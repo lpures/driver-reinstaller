@@ -28,7 +28,6 @@ import requests
 #  Константы
 # ══════════════════════════════════════════════════════════════════
 
-# devcon sources.json (поддерживается сообществом, но кабинеты — официальный Microsoft CDN)
 DEVCON_SOURCES_URL = (
     "https://raw.githubusercontent.com/Drawbackz/DevCon-Installer/"
     "master/devcon_sources.json"
@@ -45,7 +44,6 @@ DRIVER_PAGES = {
 }
 
 # NVIDIA API для получения последней версии драйвера
-# psid/pfid подбираются по обнаруженному GPU (упрощённая таблица)
 NVIDIA_DRIVER_API = (
     "https://www.nvidia.com/Download/processFind.aspx"
     "?psid={psid}&pfid={pfid}&osid=57&lid=1&whql=1&lang=ru&ctk=0"
@@ -194,7 +192,6 @@ def download_devcon(log_cb, progress_cb=None) -> str | None:
         log_cb(f"❌ Не удалось получить список источников: {e}")
         return None
 
-    # Берём первый (самый свежий) источник
     entry = sources_list[0]
     log_cb(f"   Версия WDK: {entry['Name']}")
 
@@ -346,245 +343,435 @@ def _reinstall_with_pnputil(device_id: str, log_cb) -> bool:
     return True
 
 
-# ══════════════════════════════════════════════════════════════════
-#  Проверка актуальности драйвера (открываем страницу производителя)
-# ══════════════════════════════════════════════════════════════════
-
 def open_driver_page(vendor: str):
     url = DRIVER_PAGES.get(vendor, "https://google.com/search?q=driver+update")
     webbrowser.open(url)
 
 
 # ══════════════════════════════════════════════════════════════════
-#  GUI
+#  Современный стильный графический интерфейс (Fluent Dark UI)
 # ══════════════════════════════════════════════════════════════════
 
 class App(tk.Tk):
-    # ─── Цвета ───────────────────────────────────────────────────
-    BG      = "#1e1e2e"
-    PANEL   = "#2a2a3e"
-    ACCENT  = "#7c6fe0"
-    ACC_HO  = "#9d8ff0"
-    TEXT    = "#cdd6f4"
-    SUB     = "#6c7086"
-    GREEN   = "#a6e3a1"
-    RED     = "#f38ba8"
-    YELLOW  = "#f9e2af"
-    BLUE    = "#89b4fa"
+    # Премиальная палитра глубокой темной темы
+    BG_MAIN       = "#0D1117"  # Главный фон (GitHub/Modern Dark)
+    BG_HEADER     = "#161B22"  # Верхняя панель
+    BG_SIDEBAR    = "#161B22"  # Боковая панель
+    BG_CARD       = "#21262D"  # Карточка
+    BG_CARD_HOVER = "#30363D"  # Ховер карточки
+    BG_CARD_SEL   = "#1F293D"  # Выбранная карточка
+    BG_TERMINAL   = "#090D12"  # Фон консоли
 
-    FONT    = ("Segoe UI", 10)
-    FONTSM  = ("Segoe UI", 9)
-    FONTBD  = ("Segoe UI", 10, "bold")
-    FONTBIG = ("Segoe UI", 13, "bold")
+    BORDER        = "#30363D"  # Граница разделителей
+    BORDER_ACTIVE = "#58A6FF"  # Активная рамка
+
+    # Акценты
+    PRIMARY       = "#6366F1"  # Индиго / Фиолетовый
+    PRIMARY_HOVER = "#4F46E5"
+    SUCCESS       = "#238636"  # Зеленый
+    SUCCESS_HOVER = "#2EA043"
+    DANGER        = "#DA3633"  # Красный
+    WARNING       = "#D29922"  # Оранжевый / Янтарный
+    CYAN          = "#38BDF8"  # Голубой
+
+    # Цвета текста
+    TEXT_MAIN     = "#F0F6FC"  # Яркий белый
+    TEXT_MUTED    = "#8B949E"  # Серый второстепенный
+    TEXT_ACCENT   = "#79C0FF"  # Светло-голубой
+
+    # Шрифты
+    FONT_TITLE = ("Segoe UI", 13, "bold")
+    FONT_SUB   = ("Segoe UI", 9)
+    FONT_REG   = ("Segoe UI", 10)
+    FONT_BOLD  = ("Segoe UI", 10, "bold")
+    FONT_CARD  = ("Segoe UI", 10, "bold")
+    FONT_SM    = ("Segoe UI", 8)
+    FONT_CODE  = ("Cascadia Code", 9)
 
     def __init__(self):
         super().__init__()
         hide_console()
-        self.title("Driver Reinstaller")
-        self.configure(bg=self.BG)
+        self.title("Driver Reinstaller — GPU & iGPU Maintenance")
+        self.configure(bg=self.BG_MAIN)
         self.resizable(True, True)
-        self.minsize(780, 560)
+        self.minsize(860, 640)
 
         self._devices: list[dict] = []
         self._sel: int | None = None
         self._busy = False
         self._devcon_path: str | None = find_devcon()
+        self._card_frames: list[tk.Frame] = []
 
         self._build_ui()
         self._refresh_devices()
 
         self.update_idletasks()
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        w, h = 840, 620
+        w, h = 920, 680
         self.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
 
     # ── Построение интерфейса ────────────────────────────────────
 
     def _build_ui(self):
-        # ── Шапка
-        hdr = tk.Frame(self, bg=self.PANEL, pady=12)
-        hdr.pack(fill="x")
+        # ── 1. Верхний бар (Header) ──────────────────────────────
+        header = tk.Frame(self, bg=self.BG_HEADER, height=64)
+        header.pack(fill="x", side="top")
+        header.pack_propagate(False)
+
+        # Логотип и заголовок
+        title_box = tk.Frame(header, bg=self.BG_HEADER)
+        title_box.pack(side="left", padx=20, pady=10)
+
+        logo_lbl = tk.Label(
+            title_box, text="⚡", bg=self.BG_HEADER, fg="#FBBF24",
+            font=("Segoe UI", 18, "bold")
+        )
+        logo_lbl.pack(side="left", padx=(0, 10))
+
+        text_sub_box = tk.Frame(title_box, bg=self.BG_HEADER)
+        text_sub_box.pack(side="left")
 
         tk.Label(
-            hdr, text="🖥  Driver Reinstaller",
-            bg=self.PANEL, fg=self.TEXT, font=("Segoe UI", 15, "bold")
-        ).pack(side="left", padx=20)
-
-        # Статус прав
-        adm_color = self.GREEN if is_admin() else self.RED
-        adm_text  = "✔ Администратор" if is_admin() else "✘ Без прав администратора"
-        tk.Label(
-            hdr, text=adm_text, bg=self.PANEL, fg=adm_color, font=self.FONTSM
-        ).pack(side="right", padx=20)
-
-        # Статус devcon
-        self._lbl_devcon_status = tk.Label(
-            hdr, text=self._devcon_status_text(),
-            bg=self.PANEL, fg=self.GREEN if self._devcon_path else self.YELLOW,
-            font=self.FONTSM, cursor="hand2"
-        )
-        self._lbl_devcon_status.pack(side="right", padx=(0, 4))
-        self._lbl_devcon_status.bind("<Button-1>", lambda _: self._prompt_devcon_download())
-
-        # ── Тело
-        body = tk.Frame(self, bg=self.BG)
-        body.pack(fill="both", expand=True, padx=14, pady=10)
-
-        # ── Левая панель — список устройств
-        left = tk.Frame(body, bg=self.BG)
-        left.pack(side="left", fill="y", padx=(0, 12))
+            text_sub_box, text="DRIVER REINSTALLER",
+            bg=self.BG_HEADER, fg=self.TEXT_MAIN, font=self.FONT_TITLE
+        ).pack(anchor="w")
 
         tk.Label(
-            left, text="Видеоадаптеры",
-            bg=self.BG, fg=self.SUB, font=self.FONTSM
-        ).pack(anchor="w", pady=(0, 4))
+            text_sub_box, text="Быстрая диагностика и переустановка драйверов GPU / iGPU",
+            bg=self.BG_HEADER, fg=self.TEXT_MUTED, font=self.FONT_SM
+        ).pack(anchor="w")
 
-        lbox_frame = tk.Frame(left, bg=self.PANEL, highlightthickness=1,
-                               highlightbackground=self.ACCENT)
-        lbox_frame.pack(fill="both", expand=True)
+        # Правый блок шапки — статус прав и devcon
+        badges_box = tk.Frame(header, bg=self.BG_HEADER)
+        badges_box.pack(side="right", padx=20, pady=12)
 
-        self._listbox = tk.Listbox(
-            lbox_frame,
-            bg=self.PANEL, fg=self.TEXT,
-            selectbackground=self.ACCENT, selectforeground="white",
-            font=self.FONT, width=30, bd=0,
-            activestyle="none",
+        # Бейдж прав администратора
+        is_adm = is_admin()
+        adm_bg = "#1B4729" if is_adm else "#5C1D24"
+        adm_fg = "#7EE787" if is_adm else "#FFA198"
+        adm_icon = "🛡️ " if is_adm else "⚠️ "
+        adm_text = f"{adm_icon}Администратор" if is_adm else f"{adm_icon}Без прав админа"
+
+        adm_badge = tk.Label(
+            badges_box, text=adm_text, bg=adm_bg, fg=adm_fg,
+            font=("Segoe UI", 9, "bold"), padx=10, pady=4, relief="flat"
         )
-        self._listbox.pack(fill="both", expand=True, padx=3, pady=3)
-        self._listbox.bind("<<ListboxSelect>>", self._on_select)
+        adm_badge.pack(side="right", padx=(8, 0))
 
-        self._btn_refresh = self._btn(
-            left, "↻  Обновить список", self._refresh_devices,
-            bg=self.PANEL, width=28
+        # Бейдж devcon
+        self._devcon_badge = tk.Label(
+            badges_box, text=self._devcon_status_badge_text(),
+            bg="#16293D" if self._devcon_path else "#3D2B16",
+            fg=self.CYAN if self._devcon_path else self.WARNING,
+            font=("Segoe UI", 9, "bold"), padx=10, pady=4,
+            relief="flat", cursor="hand2"
         )
-        self._btn_refresh.pack(fill="x", pady=(6, 0))
+        self._devcon_badge.pack(side="right")
+        self._devcon_badge.bind("<Button-1>", lambda _: self._prompt_devcon_download())
 
-        # ── Правая панель
-        right = tk.Frame(body, bg=self.BG)
-        right.pack(side="left", fill="both", expand=True)
+        # Тонкая разделительная линия
+        tk.Frame(self, bg=self.BORDER, height=1).pack(fill="x", side="top")
 
-        # Карточка устройства
-        self._card = tk.Frame(right, bg=self.PANEL, pady=12, padx=14)
-        self._card.pack(fill="x", pady=(0, 8))
+        # ── 2. Основная рабочая область (Split View) ──────────────
+        main_panes = tk.Frame(self, bg=self.BG_MAIN)
+        main_panes.pack(fill="both", expand=True, padx=16, pady=14)
+
+        # ── 2.1 Левая колонка — Список видеоадаптеров ─────────────
+        left_col = tk.Frame(main_panes, bg=self.BG_SIDEBAR, width=320,
+                            highlightbackground=self.BORDER, highlightthickness=1)
+        left_col.pack(side="left", fill="y", padx=(0, 14))
+        left_col.pack_propagate(False)
+
+        # Заголовок боковой панели
+        side_head = tk.Frame(left_col, bg=self.BG_SIDEBAR)
+        side_head.pack(fill="x", padx=14, pady=(12, 6))
+
+        tk.Label(
+            side_head, text="ОБНАРУЖЕННЫЕ АДАПТЕРЫ",
+            bg=self.BG_SIDEBAR, fg=self.TEXT_MUTED, font=("Segoe UI", 8, "bold")
+        ).pack(side="left")
+
+        self._btn_refresh = tk.Button(
+            side_head, text="↻ Обновить", command=self._refresh_devices,
+            bg=self.BG_CARD, fg=self.TEXT_MAIN, activebackground=self.BG_CARD_HOVER,
+            activeforeground="white", font=self.FONT_SM, relief="flat",
+            cursor="hand2", padx=8, pady=2, bd=0
+        )
+        self._btn_refresh.pack(side="right")
+
+        # Скроллируемая область с карточками устройств
+        card_canvas_container = tk.Frame(left_col, bg=self.BG_SIDEBAR)
+        card_canvas_container.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+
+        self._canvas = tk.Canvas(card_canvas_container, bg=self.BG_SIDEBAR,
+                                  bd=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(card_canvas_container, orient="vertical",
+                                  command=self._canvas.yview)
+
+        self._cards_inner = tk.Frame(self._canvas, bg=self.BG_SIDEBAR)
+        self._cards_inner.bind(
+            "<Configure>",
+            lambda e: self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+        )
+
+        self._canvas_win = self._canvas.create_window(
+            (0, 0), window=self._cards_inner, anchor="nw", width=290
+        )
+        self._canvas.configure(yscrollcommand=scrollbar.set)
+
+        self._canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # ── 2.2 Правая область — Детали, действия, консоль ───────
+        right_col = tk.Frame(main_panes, bg=self.BG_MAIN)
+        right_col.pack(side="left", fill="both", expand=True)
+
+        # ── Карточка выбранного адаптера ──────────────────────────
+        self._card = tk.Frame(right_col, bg=self.BG_CARD,
+                              highlightbackground=self.BORDER, highlightthickness=1)
+        self._card.pack(fill="x", pady=(0, 10))
+
+        card_padding = tk.Frame(self._card, bg=self.BG_CARD)
+        card_padding.pack(fill="x", padx=16, pady=14)
+
+        # Верхняя строка карточки: название и иконка
+        name_row = tk.Frame(card_padding, bg=self.BG_CARD)
+        name_row.pack(fill="x", pady=(0, 4))
+
+        self._lbl_icon = tk.Label(
+            name_row, text="🖥️", bg=self.BG_CARD, fg=self.TEXT_MAIN,
+            font=("Segoe UI", 16)
+        )
+        self._lbl_icon.pack(side="left", padx=(0, 8))
 
         self._lbl_name = tk.Label(
-            self._card, text="← Выберите устройство",
-            bg=self.PANEL, fg=self.TEXT,
-            font=self.FONTBIG, wraplength=450, justify="left"
+            name_row, text="Выберите видеоадаптер из списка слева",
+            bg=self.BG_CARD, fg=self.TEXT_MAIN, font=self.FONT_TITLE,
+            wraplength=460, justify="left"
         )
-        self._lbl_name.pack(anchor="w")
+        self._lbl_name.pack(side="left", fill="x", expand=True)
 
-        self._lbl_kind = tk.Label(
-            self._card, text="", bg=self.PANEL, fg=self.ACCENT, font=self.FONT
+        self._lbl_kind_tag = tk.Label(
+            card_padding, text="", bg=self.BG_CARD, fg=self.CYAN,
+            font=self.FONT_BOLD
         )
-        self._lbl_kind.pack(anchor="w", pady=(2, 0))
+        self._lbl_kind_tag.pack(anchor="w", pady=(0, 10))
 
-        self._lbl_info = tk.Label(
-            self._card, text="", bg=self.PANEL, fg=self.SUB,
-            font=self.FONTSM, justify="left"
+        # Сетка параметров: 3 виджета-плитки
+        self._info_grid = tk.Frame(card_padding, bg=self.BG_CARD)
+        self._info_grid.pack(fill="x", pady=(0, 6))
+
+        # Плитка: Версия драйвера
+        self._tile_ver = self._create_tile(self._info_grid, "ВЕРСИЯ ДРАЙВЕРА", "—")
+        self._tile_ver.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        # Плитка: Дата драйвера
+        self._tile_date = self._create_tile(self._info_grid, "ДАТА ВЫПУСКА", "—")
+        self._tile_date.pack(side="left", fill="x", expand=True, padx=3)
+
+        # Плитка: Статус устройства
+        self._tile_stat = self._create_tile(self._info_grid, "СТАТУС WINDOWS", "—")
+        self._tile_stat.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        # Строка с PNP Hardware ID
+        self._pnp_box = tk.Frame(card_padding, bg="#161B22", padx=8, pady=6)
+        self._pnp_box.pack(fill="x", pady=(8, 0))
+
+        tk.Label(
+            self._pnp_box, text="PNP ID:", bg="#161B22", fg=self.TEXT_MUTED,
+            font=self.FONT_SM
+        ).pack(side="left")
+
+        self._lbl_pnp = tk.Label(
+            self._pnp_box, text="—", bg="#161B22", fg="#A5D6FF",
+            font=self.FONT_CODE, wraplength=400, justify="left"
         )
-        self._lbl_info.pack(anchor="w", pady=(4, 0))
+        self._lbl_pnp.pack(side="left", padx=6, fill="x", expand=True)
 
-        # Кнопки действий
-        btn_row = tk.Frame(right, bg=self.BG)
-        btn_row.pack(fill="x", pady=(0, 8))
+        self._btn_copy_pnp = tk.Button(
+            self._pnp_box, text="📋", command=self._copy_pnp,
+            bg="#21262D", fg=self.TEXT_MAIN, activebackground=self.BG_CARD_HOVER,
+            activeforeground="white", font=self.FONT_SM, relief="flat",
+            bd=0, cursor="hand2", padx=6, pady=2
+        )
+        self._btn_copy_pnp.pack(side="right")
 
-        self._btn_reinstall = self._btn(
-            btn_row, "⟳  Переустановить драйвер", self._start_reinstall,
-            bg=self.ACCENT, fg="white", font=("Segoe UI", 11, "bold"), pady=9
+        # ── Панель основных действий (Action Buttons) ────────────
+        btn_bar = tk.Frame(right_col, bg=self.BG_MAIN)
+        btn_bar.pack(fill="x", pady=(0, 10))
+
+        # Большая кнопка переустановки
+        self._btn_reinstall = tk.Button(
+            btn_bar, text="⚡  Переустановить драйвер", command=self._start_reinstall,
+            bg=self.PRIMARY, fg="white", activebackground=self.PRIMARY_HOVER,
+            activeforeground="white", font=("Segoe UI", 11, "bold"),
+            relief="flat", cursor="hand2", pady=10, bd=0
         )
         self._btn_reinstall.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self._btn_reinstall.config(state="disabled")
 
-        self._btn_driver_page = self._btn(
-            btn_row, "🌐 Новый драйвер", self._open_driver_page,
-            bg=self.PANEL, pady=9
+        # Кнопка открытия официальной страницы
+        self._btn_driver_page = tk.Button(
+            btn_bar, text="🌐  Новый драйвер", command=self._open_driver_page,
+            bg=self.BG_CARD, fg=self.TEXT_MAIN, activebackground=self.BG_CARD_HOVER,
+            activeforeground="white", font=self.FONT_BOLD,
+            relief="flat", cursor="hand2", pady=10, bd=0
         )
-        self._btn_driver_page.pack(side="left", fill="x", expand=True)
+        self._btn_driver_page.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self._btn_driver_page.config(state="disabled")
 
-        # devcon-блок
-        self._devcon_frame = tk.Frame(right, bg=self.PANEL, pady=8, padx=12)
-        self._devcon_frame.pack(fill="x", pady=(0, 8))
+        # Кнопка открытия Диспетчера устройств
+        self._btn_devmgmt = tk.Button(
+            btn_bar, text="🛠️  Диспетчер устройств", command=self._open_devmgmt,
+            bg=self.BG_CARD, fg=self.TEXT_MAIN, activebackground=self.BG_CARD_HOVER,
+            activeforeground="white", font=self.FONT_BOLD,
+            relief="flat", cursor="hand2", pady=10, bd=0
+        )
+        self._btn_devmgmt.pack(side="left", fill="x", expand=True)
+
+        # ── Информационный блок devcon ───────────────────────────
+        self._devcon_frame = tk.Frame(right_col, bg=self.BG_CARD,
+                                      highlightbackground=self.BORDER, highlightthickness=1)
+        self._devcon_frame.pack(fill="x", pady=(0, 10))
         self._rebuild_devcon_block()
 
-        # Прогресс-бар
+        # Прогресс-бар загрузки devcon
         self._progress_var = tk.DoubleVar(value=0)
         self._progressbar = ttk.Progressbar(
-            right, variable=self._progress_var,
-            maximum=100, mode="determinate", length=400
+            right_col, variable=self._progress_var,
+            maximum=100, mode="determinate"
         )
         self._progress_label = tk.Label(
-            right, text="", bg=self.BG, fg=self.SUB, font=self.FONTSM
+            right_col, text="", bg=self.BG_MAIN, fg=self.TEXT_MUTED, font=self.FONT_SM
         )
 
-        # Лог
+        # ── Журнал операций (Console Log) ────────────────────────
+        log_header = tk.Frame(right_col, bg=self.BG_MAIN)
+        log_header.pack(fill="x", pady=(0, 4))
+
         tk.Label(
-            right, text="Журнал операций",
-            bg=self.BG, fg=self.SUB, font=self.FONTSM
-        ).pack(anchor="w")
+            log_header, text="ЖУРНАЛ ОПЕРАЦИЙ",
+            bg=self.BG_MAIN, fg=self.TEXT_MUTED, font=("Segoe UI", 8, "bold")
+        ).pack(side="left")
+
+        # Кнопки копирования и очистки лога
+        btn_copy_log = tk.Button(
+            log_header, text="Копировать лог", command=self._copy_log,
+            bg=self.BG_CARD, fg=self.TEXT_MUTED, activebackground=self.BG_CARD_HOVER,
+            activeforeground=self.TEXT_MAIN, font=self.FONT_SM, relief="flat",
+            bd=0, cursor="hand2", padx=6, pady=1
+        )
+        btn_copy_log.pack(side="right", padx=(4, 0))
+
+        btn_clear_log = tk.Button(
+            log_header, text="Очистить", command=self._clear_log,
+            bg=self.BG_CARD, fg=self.TEXT_MUTED, activebackground=self.BG_CARD_HOVER,
+            activeforeground=self.TEXT_MAIN, font=self.FONT_SM, relief="flat",
+            bd=0, cursor="hand2", padx=6, pady=1
+        )
+        btn_clear_log.pack(side="right")
+
+        log_container = tk.Frame(right_col, bg=self.BG_TERMINAL,
+                                 highlightbackground=self.BORDER, highlightthickness=1)
+        log_container.pack(fill="both", expand=True)
 
         self._log = scrolledtext.ScrolledText(
-            right,
-            bg="#12121c", fg=self.TEXT,
-            font=("Consolas", 9), bd=0, relief="flat",
-            state="disabled", height=10,
+            log_container,
+            bg=self.BG_TERMINAL, fg=self.TEXT_MAIN,
+            font=self.FONT_CODE, bd=0, relief="flat",
+            state="disabled", height=8, insertbackground="white"
         )
-        self._log.pack(fill="both", expand=True, pady=(4, 0))
-        self._log.tag_config("ok",   foreground=self.GREEN)
-        self._log.tag_config("err",  foreground=self.RED)
-        self._log.tag_config("warn", foreground=self.YELLOW)
-        self._log.tag_config("cmd",  foreground=self.ACCENT)
-        self._log.tag_config("gray", foreground=self.SUB)
-        self._log.tag_config("blue", foreground=self.BLUE)
+        self._log.pack(fill="both", expand=True, padx=6, pady=6)
+
+        # Подсветка строк журнала
+        self._log.tag_config("ok",    foreground="#7EE787")  # Зеленый
+        self._log.tag_config("err",   foreground="#FFA198")  # Красный
+        self._log.tag_config("warn",  foreground="#F1E05A")  # Желтый
+        self._log.tag_config("cmd",   foreground="#A5D6FF")  # Синий
+        self._log.tag_config("gray",  foreground="#8B949E")  # Серый
+        self._log.tag_config("blue",  foreground="#79C0FF")  # Голубой
+
+    # ── Вспомогательные методы создания UI ───────────────────────
+
+    def _create_tile(self, parent, title: str, val: str) -> tk.Frame:
+        """Создает стильную плитку-параметр."""
+        tile = tk.Frame(parent, bg="#161B22", padx=10, pady=8,
+                        highlightbackground=self.BORDER, highlightthickness=1)
+        tk.Label(
+            tile, text=title, bg="#161B22", fg=self.TEXT_MUTED,
+            font=("Segoe UI", 7, "bold")
+        ).pack(anchor="w")
+
+        lbl_val = tk.Label(
+            tile, text=val, bg="#161B22", fg=self.TEXT_MAIN,
+            font=("Segoe UI", 11, "bold")
+        )
+        lbl_val.pack(anchor="w", pady=(2, 0))
+        tile._val_lbl = lbl_val
+        return tile
 
     def _rebuild_devcon_block(self):
         for w in self._devcon_frame.winfo_children():
             w.destroy()
 
+        box = tk.Frame(self._devcon_frame, bg=self.BG_CARD, padx=14, pady=8)
+        box.pack(fill="x")
+
         if self._devcon_path:
             tk.Label(
-                self._devcon_frame,
-                text=f"✔ devcon.exe: {self._devcon_path}",
-                bg=self.PANEL, fg=self.GREEN, font=self.FONTSM
+                box, text="✔  devcon.exe активен (глубокая переустановка доступна)",
+                bg=self.BG_CARD, fg="#7EE787", font=self.FONT_SM
             ).pack(side="left")
+            tk.Label(
+                box, text=self._devcon_path,
+                bg=self.BG_CARD, fg=self.TEXT_MUTED, font=self.FONT_SM
+            ).pack(side="right")
         else:
             tk.Label(
-                self._devcon_frame,
-                text="⚠ devcon.exe не найден  —  переустановка будет менее полной.",
-                bg=self.PANEL, fg=self.YELLOW, font=self.FONTSM
+                box, text="💡 Рекомендуется скачать devcon.exe для более чистой переустановки:",
+                bg=self.BG_CARD, fg=self.TEXT_MUTED, font=self.FONT_SM
             ).pack(side="left")
-            self._btn_get_devcon = self._btn(
-                self._devcon_frame,
-                "⬇ Скачать devcon.exe", self._prompt_devcon_download,
-                bg=self.ACCENT, fg="white", pady=3
+
+            btn_get = tk.Button(
+                box, text="⬇ Скачать devcon (~6 MB)", command=self._prompt_devcon_download,
+                bg=self.PRIMARY, fg="white", activebackground=self.PRIMARY_HOVER,
+                activeforeground="white", font=self.FONT_SM, relief="flat",
+                bd=0, cursor="hand2", padx=8, pady=3
             )
-            self._btn_get_devcon.pack(side="right", padx=(10, 0))
+            btn_get.pack(side="right")
 
-    def _devcon_status_text(self) -> str:
+    def _devcon_status_badge_text(self) -> str:
         if self._devcon_path:
-            return "devcon ✔"
-        return "devcon ✘ (нажмите для скачивания)"
+            return "⚙️ devcon: Готов"
+        return "⬇ Скачать devcon"
 
-    # ── Вспомогательные ─────────────────────────────────────────
+    def _open_devmgmt(self):
+        try:
+            subprocess.Popen("devmgmt.msc", shell=True)
+            self._log_write("🛠️ Открыт Диспетчер устройств Windows.")
+        except Exception as e:
+            self._log_write(f"❌ Не удалось открыть devmgmt.msc: {e}")
 
-    def _btn(self, parent, text, cmd, *,
-             bg=None, fg=None, font=None, width=None, pady=5) -> tk.Button:
-        kw = dict(
-            text=text, command=cmd,
-            bg=bg or self.PANEL, fg=fg or self.TEXT,
-            activebackground=self.ACC_HO, activeforeground="white",
-            font=font or self.FONTBD, relief="flat", cursor="hand2",
-            pady=pady, bd=0,
-        )
-        if width:
-            kw["width"] = width
-        b = tk.Button(parent, **kw)
-        orig_bg = bg or self.PANEL
-        orig_fg = fg or self.TEXT
-        b.bind("<Enter>", lambda _: b.config(bg=self.ACC_HO, fg="white"))
-        b.bind("<Leave>", lambda _: b.config(bg=orig_bg, fg=orig_fg))
-        return b
+    def _copy_pnp(self):
+        if self._sel is not None and self._devices:
+            dev = self._devices[self._sel]
+            pnp = dev.get("device_id", "")
+            if pnp:
+                self.clipboard_clear()
+                self.clipboard_append(pnp)
+                self._log_write(f"📋 Скопирован Hardware ID: {pnp}")
+
+    def _copy_log(self):
+        log_content = self._log.get("1.0", "end-1c")
+        if log_content:
+            self.clipboard_clear()
+            self.clipboard_append(log_content)
+            messagebox.showinfo("Скопировано", "Журнал операций скопирован в буфер обмена.")
+
+    def _clear_log(self):
+        self._log.config(state="normal")
+        self._log.delete("1.0", "end")
+        self._log.config(state="disabled")
 
     def _log_write(self, msg: str):
         def _do():
@@ -600,7 +787,7 @@ class App(tk.Tk):
                 tag = "cmd"
             elif msg.startswith("  "):
                 tag = "gray"
-            elif any(msg.startswith(p) for p in ("🌐", "📥", "📦", "🔐", "📋")):
+            elif any(msg.startswith(p) for p in ("🌐", "📥", "📦", "🔐", "📋", "🛠️")):
                 tag = "blue"
             self._log.insert("end", msg + "\n", tag)
             self._log.see("end")
@@ -619,11 +806,13 @@ class App(tk.Tk):
                 self._progress_label.pack_forget()
         self.after(0, _do)
 
-    # ── Логика ───────────────────────────────────────────────────
+    # ── Логика работы с устройствами ─────────────────────────────
 
     def _refresh_devices(self):
         self._log_write("🔍 Обнаружение видеоадаптеров...")
-        self._listbox.delete(0, "end")
+        for c in self._cards_inner.winfo_children():
+            c.destroy()
+        self._card_frames.clear()
         self._devices = []
         self._sel = None
         self._btn_reinstall.config(state="disabled")
@@ -638,44 +827,144 @@ class App(tk.Tk):
 
     def _populate_list(self, devs: list[dict]):
         self._devices = devs
-        for d in devs:
-            prefix = "●  "
-            self._listbox.insert("end", f"  {prefix}{d['name']}")
+        for idx, d in enumerate(devs):
+            card = self._create_device_card(idx, d)
+            self._card_frames.append(card)
+
         if devs:
-            self._log_write(f"✅ Обнаружено адаптеров: {len(devs)}")
+            self._log_write(f"✅ Обнаружено видеоадаптеров: {len(devs)}")
             for d in devs:
                 self._log_write(
                     f"  • {d['name']} | {d['kind']} | drv {d['driver_ver']}"
                 )
+            # Автовыбор первого устройства
+            self._select_device(0)
         else:
             self._log_write("⚠ Видеоадаптеры не обнаружены.")
 
-    def _on_select(self, _=None):
-        sel = self._listbox.curselection()
-        if not sel or self._busy:
+    def _create_device_card(self, idx: int, dev: dict) -> tk.Frame:
+        """Создает стильную карточку видеоадаптера в боковом списке."""
+        # Цвета рамки вендора
+        vendor = dev.get("vendor", "unknown")
+        if vendor == "nvidia":
+            badge_text = "NVIDIA"
+            badge_bg   = "#1A3319"
+            badge_fg   = "#76B900"
+            icon_char  = "🟢"
+        elif vendor == "amd":
+            badge_text = "AMD"
+            badge_bg   = "#3B1B1E"
+            badge_fg   = "#FF7B72"
+            icon_char  = "🔴"
+        elif vendor == "intel":
+            badge_text = "INTEL"
+            badge_bg   = "#162842"
+            badge_fg   = "#58A6FF"
+            icon_char  = "🔵"
+        else:
+            badge_text = "GPU"
+            badge_bg   = "#21262D"
+            badge_fg   = "#8B949E"
+            icon_char  = "⚪"
+
+        card = tk.Frame(
+            self._cards_inner, bg=self.BG_CARD,
+            highlightbackground=self.BORDER, highlightthickness=1,
+            cursor="hand2"
+        )
+        card.pack(fill="x", pady=4, padx=4)
+
+        inner = tk.Frame(card, bg=self.BG_CARD, padx=10, pady=8)
+        inner.pack(fill="both", expand=True)
+
+        top_row = tk.Frame(inner, bg=self.BG_CARD)
+        top_row.pack(fill="x")
+
+        b_lbl = tk.Label(
+            top_row, text=f" {icon_char} {badge_text} ", bg=badge_bg, fg=badge_fg,
+            font=("Segoe UI", 7, "bold"), relief="flat"
+        )
+        b_lbl.pack(side="left")
+
+        kind_short = "Дискретная" if "дискретная" in dev["kind"].lower() else "Встроенная"
+        k_lbl = tk.Label(
+            top_row, text=kind_short, bg=self.BG_CARD, fg=self.TEXT_MUTED,
+            font=self.FONT_SM
+        )
+        k_lbl.pack(side="right")
+
+        name_lbl = tk.Label(
+            inner, text=dev["name"], bg=self.BG_CARD, fg=self.TEXT_MAIN,
+            font=self.FONT_CARD, wraplength=250, justify="left"
+        )
+        name_lbl.pack(anchor="w", pady=(4, 2))
+
+        drv_lbl = tk.Label(
+            inner, text=f"Драйвер: {dev['driver_ver']}", bg=self.BG_CARD,
+            fg=self.TEXT_MUTED, font=self.FONT_SM
+        )
+        drv_lbl.pack(anchor="w")
+
+        # Привязка кликов ко всем дочерним виджетам
+        def _on_click(_=None):
+            self._select_device(idx)
+
+        for w in (card, inner, top_row, b_lbl, k_lbl, name_lbl, drv_lbl):
+            w.bind("<Button-1>", _on_click)
+            w.configure(cursor="hand2")
+
+        return card
+
+    def _select_device(self, idx: int):
+        if self._busy:
             return
-        self._sel = sel[0]
-        dev = self._devices[self._sel]
+        self._sel = idx
+        # Подсветка карточек
+        for i, f in enumerate(self._card_frames):
+            if i == idx:
+                f.config(highlightbackground=self.BORDER_ACTIVE, highlightthickness=2)
+            else:
+                f.config(highlightbackground=self.BORDER, highlightthickness=1)
+
+        dev = self._devices[idx]
         self._update_card(dev)
         self._btn_reinstall.config(state="normal")
         self._btn_driver_page.config(state="normal")
 
     def _update_card(self, dev: dict | None):
         if dev is None:
-            self._lbl_name.config(text="← Выберите устройство")
-            self._lbl_kind.config(text="")
-            self._lbl_info.config(text="")
+            self._lbl_name.config(text="Выберите видеоадаптер из списка слева")
+            self._lbl_kind_tag.config(text="")
+            self._lbl_icon.config(text="🖥️")
+            self._tile_ver._val_lbl.config(text="—")
+            self._tile_date._val_lbl.config(text="—")
+            self._tile_stat._val_lbl.config(text="—")
+            self._lbl_pnp.config(text="—")
             return
+
+        # Иконка вендора
+        vendor = dev.get("vendor", "unknown")
+        if vendor == "nvidia":
+            self._lbl_icon.config(text="🟢", fg="#76B900")
+        elif vendor == "amd":
+            self._lbl_icon.config(text="🔴", fg="#FF7B72")
+        elif vendor == "intel":
+            self._lbl_icon.config(text="🔵", fg="#58A6FF")
+        else:
+            self._lbl_icon.config(text="🖥️", fg=self.TEXT_MAIN)
+
         self._lbl_name.config(text=dev["name"])
-        self._lbl_kind.config(text=dev["kind"])
-        self._lbl_info.config(
-            text=(
-                f"Версия драйвера: {dev['driver_ver']}   "
-                f"Дата: {dev['driver_date']}   "
-                f"Статус: {dev['status']}\n"
-                f"PNP ID: {dev['device_id']}"
-            )
-        )
+        self._lbl_kind_tag.config(text=f"● {dev['kind']}")
+
+        # Обновляем плитки
+        self._tile_ver._val_lbl.config(text=dev.get("driver_ver", "N/A"))
+        self._tile_date._val_lbl.config(text=dev.get("driver_date", "N/A"))
+        stat = dev.get("status", "OK")
+        stat_color = "#7EE787" if stat.lower() == "ok" else "#FFA198"
+        self._tile_stat._val_lbl.config(text=f"● {stat}", fg=stat_color)
+
+        # PNP ID
+        self._lbl_pnp.config(text=dev.get("device_id", "N/A"))
 
     def _open_driver_page(self):
         if self._sel is None:
@@ -685,7 +974,7 @@ class App(tk.Tk):
         self._log_write(f"🌐 Открываем страницу драйверов: {url}")
         webbrowser.open(url)
 
-    # ── devcon скачивание ─────────────────────────────────────────
+    # ── Скачивание devcon ─────────────────────────────────────────
 
     def _prompt_devcon_download(self):
         if not is_admin():
@@ -710,7 +999,7 @@ class App(tk.Tk):
         if not messagebox.askyesno(
             "Скачать devcon.exe",
             "devcon.exe будет загружен с официального Microsoft CDN\n"
-            "(~6 МБ, WDK CAB-файл) и установлен в:\n\n"
+            "(~6 МБ, официальный CAB-файл WDK) и установлен в:\n\n"
             f"{DEVCON_DEST}\n\n"
             "Продолжить?"
         ):
@@ -737,8 +1026,9 @@ class App(tk.Tk):
             self._btn_reinstall.config(state="normal")
         if path:
             self._devcon_path = path
-            self._lbl_devcon_status.config(
-                text=self._devcon_status_text(), fg=self.GREEN
+            self._devcon_badge.config(
+                text=self._devcon_status_badge_text(),
+                bg="#16293D", fg=self.CYAN
             )
             self._rebuild_devcon_block()
             messagebox.showinfo(
@@ -752,7 +1042,7 @@ class App(tk.Tk):
                 "Не удалось установить devcon.exe.\nСм. журнал операций."
             )
 
-    # ── Переустановка ─────────────────────────────────────────────
+    # ── Переустановка драйвера ────────────────────────────────────
 
     def _start_reinstall(self):
         if self._busy or self._sel is None:
@@ -769,25 +1059,25 @@ class App(tk.Tk):
         dev = self._devices[self._sel]
         confirm = messagebox.askyesno(
             "Подтверждение переустановки",
-            f"Переустановить драйвер:\n\n"
-            f"  Устройство: {dev['name']}\n"
-            f"  Тип:        {dev['kind']}\n"
-            f"  Версия:     {dev['driver_ver']}\n\n"
-            "⚠ Экран может кратковременно погаснуть.\n"
+            f"Переустановить драйвер для:\n\n"
+            f"  • Устройство: {dev['name']}\n"
+            f"  • Тип:        {dev['kind']}\n"
+            f"  • Версия:     {dev['driver_ver']}\n\n"
+            "⚠️ Экран может кратковременно погаснуть (1-3 сек).\n\n"
             "Продолжить?"
         )
         if not confirm:
             return
 
         self._busy = True
-        self._btn_reinstall.config(state="disabled", text="⏳ Выполняется...")
+        self._btn_reinstall.config(state="disabled", text="⏳ Выполняется...", bg=self.WARNING)
         self._btn_refresh.config(state="disabled")
         self._btn_driver_page.config(state="disabled")
 
-        self._log_write("\n" + "─" * 50)
-        self._log_write(f"🚀 Переустановка: {dev['name']}")
+        self._log_write("\n" + "═" * 50)
+        self._log_write(f"🚀 Переустановка драйвера: {dev['name']}")
         self._log_write(f"   PNP ID: {dev['device_id']}")
-        self._log_write("─" * 50)
+        self._log_write("═" * 50)
 
         def _worker():
             ok = reinstall_driver(dev["device_id"], self._log_write)
@@ -797,16 +1087,18 @@ class App(tk.Tk):
 
     def _on_reinstall_done(self, ok: bool):
         self._busy = False
-        self._btn_reinstall.config(state="normal", text="⟳  Переустановить драйвер")
+        self._btn_reinstall.config(
+            state="normal", text="⚡  Переустановить драйвер", bg=self.PRIMARY
+        )
         self._btn_refresh.config(state="normal")
         self._btn_driver_page.config(state="normal")
 
         if ok:
             messagebox.showinfo(
                 "Готово",
-                "Переустановка завершена.\n\n"
+                "Переустановка завершена!\n\n"
                 "💡 Рекомендуется перезагрузить компьютер.\n"
-                "💡 Для установки новейших драйверов нажмите «🌐 Новый драйвер»."
+                "💡 Для загрузки самых свежих драйверов нажмите «🌐 Новый драйвер»."
             )
         else:
             messagebox.showwarning(
@@ -837,7 +1129,6 @@ if __name__ == "__main__":
 
         if ans:
             run_as_admin()
-        # Иначе — запускаем в режиме просмотра (без переустановки)
 
     app = App()
     app.mainloop()
