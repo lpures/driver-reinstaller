@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+_setup_temp/
+.vscode/
+.idea/
