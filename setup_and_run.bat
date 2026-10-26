@@ -163,12 +163,15 @@ if not exist "%APP%" (
     goto :FAIL
 )
 
-"%PYTHON_EXE%" "%APP%"
-if %errorlevel% neq 0 (
-    echo.
-    echo  [!!] App crashed with code %errorlevel%
-    pause
+:: Try to launch via pythonw.exe (no console window)
+set "PYTHONW_EXE=%PYTHON_EXE:python.exe=pythonw.exe%"
+if exist "%PYTHONW_EXE%" (
+    start "" "%PYTHONW_EXE%" "%APP%"
+    endlocal
+    exit /b 0
 )
+
+start "" "%PYTHON_EXE%" "%APP%"
 endlocal
 exit /b 0
 

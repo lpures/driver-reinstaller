@@ -53,8 +53,19 @@ NVIDIA_DRIVER_API = (
 
 
 # ══════════════════════════════════════════════════════════════════
-#  Права администратора
+#  Права администратора и скрытие консоли
 # ══════════════════════════════════════════════════════════════════
+
+def hide_console():
+    """Скрывает окно консоли при открытии графического интерфейса."""
+    try:
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            # 0 = SW_HIDE
+            ctypes.windll.user32.ShowWindow(hwnd, 0)
+    except Exception:
+        pass
+
 
 def is_admin() -> bool:
     try:
@@ -64,8 +75,14 @@ def is_admin() -> bool:
 
 
 def run_as_admin():
+    # По возможности используем pythonw.exe для запуска без консольного окна
+    python_exe = sys.executable
+    dirname = os.path.dirname(python_exe)
+    pythonw = os.path.join(dirname, "pythonw.exe")
+    exe_to_use = pythonw if os.path.exists(pythonw) else python_exe
+
     ctypes.windll.shell32.ShellExecuteW(
-        None, "runas", sys.executable, f'"{os.path.abspath(__file__)}"', None, 1
+        None, "runas", exe_to_use, f'"{os.path.abspath(__file__)}"', None, 1
     )
     sys.exit()
 
@@ -362,6 +379,7 @@ class App(tk.Tk):
 
     def __init__(self):
         super().__init__()
+        hide_console()
         self.title("Driver Reinstaller")
         self.configure(bg=self.BG)
         self.resizable(True, True)
@@ -802,6 +820,7 @@ class App(tk.Tk):
 # ══════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    hide_console()
     if not is_admin():
         try:
             root_tmp = tk.Tk()
