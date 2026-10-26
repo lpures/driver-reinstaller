@@ -4,11 +4,15 @@ Driver Reinstaller — утилита для переустановки/обно
 • Автоматически обнаруживает видеоадаптеры через WMI
 • Предлагает скачать devcon.exe из официального WDK (Microsoft CDN)
 • Открывает страницу последних драйверов от производителя (NVIDIA / AMD / Intel)
+• Точка восстановления Windows в 1 клик
+• Бэкап драйверов через pnputil /export-driver
+• Перезапуск видеоподсистемы (Win + Ctrl + Shift + B)
+• Очистка шейдерного кэша (NVIDIA / AMD / DirectX)
 • Требует прав администратора для работы с драйверами
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, messagebox, scrolledtext, filedialog
 import threading
 import subprocess
 import ctypes
@@ -73,7 +77,6 @@ def is_admin() -> bool:
 
 
 def run_as_admin():
-    # По возможности используем pythonw.exe для запуска без консольного окна
     python_exe = sys.executable
     dirname = os.path.dirname(python_exe)
     pythonw = os.path.join(dirname, "pythonw.exe")
@@ -100,17 +103,41 @@ def get_gpu_devices() -> list[dict]:
             if any(kw.lower() in name.lower() for kw in IGNORED_KEYWORDS):
                 continue
 
-            device_id  = gpu.PNPDeviceID or ""
-            status     = gpu.Status or "Unknown"
-            driver_ver = gpu.DriverVersion or "N/A"
+            device_id   = gpu.PNPDeviceID or ""
+            status      = gpu.Status or "Unknown"
+            driver_ver  = gpu.DriverVersion or "N/A"
             driver_date = str(gpu.DriverDate or "N/A")[:10]
+
+            # Дополнительные свойства дисплея
+            res_h = gpu.CurrentHorizontalResolution
+            res_v = gpu.CurrentVerticalResolution
+            refresh = gpu.CurrentRefreshRate
+            if res_h and res_v:
+                resolution = f"{res_h}x{res_v}"
+                if refresh:
+                    resolution += f" @ {refresh} Гц"
+            else:
+                resolution = "Не активен"
+
+            # Память адаптера
+            raw_ram = gpu.AdapterRAM
+            if raw_ram:
+                try:
+                    ram_mb = int(raw_ram) // (1024 * 1024)
+                    if ram_mb >= 1024:
+                        ram_str = f"{ram_mb / 1024:.1f} ГБ"
+                    else:
+                        ram_str = f"{ram_mb} МБ"
+                except Exception:
+                    ram_str = "N/A"
+            else:
+                ram_str = "Динамическая"
 
             name_low = name.lower()
             if "nvidia" in name_low:
                 vendor = "nvidia"
                 kind   = "dGPU (дискретная NVIDIA)"
             elif "amd" in name_low or "radeon" in name_low:
-                # Встроенная или дискретная AMD
                 if any(x in name_low for x in ["vega", "780m", "760m", "680m", "integrated"]):
                     vendor = "amd"
                     kind   = "iGPU (встроенная AMD)"
@@ -132,6 +159,8 @@ def get_gpu_devices() -> list[dict]:
                 "status":      status,
                 "driver_ver":  driver_ver,
                 "driver_date": driver_date,
+                "resolution":  resolution,
+                "ram":         ram_str,
             })
     except Exception as e:
         devices.append({
@@ -142,6 +171,8 @@ def get_gpu_devices() -> list[dict]:
             "status":      "Error",
             "driver_ver":  "N/A",
             "driver_date": "N/A",
+            "resolution":  "—",
+            "ram":         "—",
         })
     finally:
         pythoncom.CoUninitialize()
@@ -164,7 +195,7 @@ def find_devcon() -> str | None:
             res = subprocess.run(
                 [path], capture_output=True, timeout=3
             )
-            return path          # devcon без аргументов всегда выходит с ненулевым кодом
+            return path
         except FileNotFoundError:
             continue
         except Exception:
@@ -177,10 +208,7 @@ def _sha256(data: bytes) -> str:
 
 
 def download_devcon(log_cb, progress_cb=None) -> str | None:
-    """
-    Загружает devcon.exe с официального Microsoft CDN через список источников.
-    Возвращает путь к установленному файлу или None при ошибке.
-    """
+    """Загружает devcon.exe с официального Microsoft CDN через список источников."""
     arch = "X64" if platform.machine().endswith("64") else "X86"
     log_cb(f"🌐 Получение списка источников WDK (архитектура: {arch})...")
 
@@ -223,7 +251,6 @@ def download_devcon(log_cb, progress_cb=None) -> str | None:
         log_cb(f"❌ Ошибка загрузки: {e}")
         return None
 
-    # Проверка SHA-256
     log_cb("🔐 Проверка контрольной суммы SHA-256...")
     actual_sha = _sha256(cab_data)
     if actual_sha != expected_sha:
@@ -233,7 +260,6 @@ def download_devcon(log_cb, progress_cb=None) -> str | None:
         return None
     log_cb("   ✔ Контрольная сумма верна.")
 
-    # Распаковка CAB
     tmp_dir = tempfile.mkdtemp(prefix="devcon_")
     cab_path = os.path.join(tmp_dir, "devcon.cab")
     try:
@@ -344,8 +370,122 @@ def _reinstall_with_pnputil(device_id: str, log_cb) -> bool:
 
 
 def open_driver_page(vendor: str):
-    url = DRIVER_PAGES.get(vendor, "https://google.com/search?q=driver+update")
+    url = DRIVER_PAGES.get(vendor, "https://google.com/search?q=gpu+driver+update")
     webbrowser.open(url)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Новые системные инструменты: Точка восстановления, Бэкап,
+#  Сброс видеодрайвера и Очистка шейдеров
+# ══════════════════════════════════════════════════════════════════
+
+def create_restore_point(log_cb) -> bool:
+    """Создает контрольную точку восстановления Windows перед работой с драйверами."""
+    log_cb("\n🛡️ Создание точки восстановления Windows...")
+    ps_cmd = (
+        "try { "
+        "  Enable-ComputerRestore -Drive 'C:\\' -ErrorAction SilentlyContinue; "
+        "  Checkpoint-Computer -Description 'Driver Reinstaller Safety Backup' "
+        "  -RestorePointType 'DEVICE_DRIVER_INSTALL' -ErrorAction Stop; "
+        "  Write-Host 'SUCCESS' "
+        "} catch { "
+        "  Write-Host ('ERROR: ' + $_.Exception.Message) "
+        "}"
+    )
+    code, out = _run_cmd(["powershell", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd], log_cb, timeout=120)
+    if "SUCCESS" in out:
+        log_cb("✅ Точка восстановления успешно создана!")
+        return True
+    else:
+        log_cb("⚠️ Не удалось создать точку восстановления (возможно, отключена защита системы).")
+        return False
+
+
+def export_driver_backup(target_dir: str, log_cb) -> bool:
+    """Экспортирует все установленные OEM-драйверы в указанную папку."""
+    os.makedirs(target_dir, exist_ok=True)
+    log_cb(f"\n💾 Резервное копирование драйверов в: {target_dir}")
+    code, out = _run_cmd(["pnputil", "/export-driver", "*", target_dir], log_cb, timeout=180)
+    if code == 0 or "успешно" in out.lower() or "exported" in out.lower():
+        log_cb(f"✅ Бэкап драйверов успешно сохранен в: {target_dir}")
+        return True
+    else:
+        log_cb("⚠️ Бэкап завершился с предупреждениями.")
+        return False
+
+
+def restart_gpu_driver(log_cb):
+    """
+    Эмулирует нажатие Win + Ctrl + Shift + B (перезапуск видеодрайвера Windows).
+    Помогает при зависании картинки, черном экране или артефактах.
+    """
+    log_cb("\n⚡ Перезапуск графической подсистемы (Win + Ctrl + Shift + B)...")
+    VK_LWIN    = 0x5B
+    VK_CONTROL = 0x11
+    VK_SHIFT   = 0x10
+    VK_B       = 0x42
+    KEYEVENTF_KEYUP = 0x0002
+
+    user32 = ctypes.windll.user32
+    try:
+        # Нажатие клавиш
+        user32.keybd_event(VK_LWIN, 0, 0, 0)
+        user32.keybd_event(VK_CONTROL, 0, 0, 0)
+        user32.keybd_event(VK_SHIFT, 0, 0, 0)
+        user32.keybd_event(VK_B, 0, 0, 0)
+        # Отпускание клавиш
+        user32.keybd_event(VK_B, 0, KEYEVENTF_KEYUP, 0)
+        user32.keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0)
+        user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+        user32.keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0)
+        log_cb("✅ Сигнал сброса графического драйвера отправлен (экран моргнет).")
+    except Exception as e:
+        log_cb(f"❌ Ошибка вызова Win+Ctrl+Shift+B: {e}")
+
+
+def clean_shader_caches(log_cb) -> tuple[int, int]:
+    """
+    Очищает кэши шейдеров DirectX, NVIDIA, AMD и Intel.
+    Устраняет микрофризы и статтеры в играх после смены драйвера.
+    Возвращает (кол-во удаленных файлов, освобождено байт).
+    """
+    log_cb("\n🧹 Очистка кэша шейдеров GPU (DirectX / Vulkan / Driver Cache)...")
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    app_data = os.environ.get("APPDATA", "")
+
+    cache_dirs = [
+        os.path.join(local_app_data, "NVIDIA", "DXCache"),
+        os.path.join(local_app_data, "NVIDIA", "GLCache"),
+        os.path.join(app_data, "NVIDIA", "ComputeCache"),
+        os.path.join(local_app_data, "AMD", "DxCache"),
+        os.path.join(local_app_data, "AMD", "GLCache"),
+        os.path.join(local_app_data, "D3DSCache"),
+        os.path.join(local_app_data, "Intel", "ShaderCache"),
+    ]
+
+    total_files = 0
+    total_bytes = 0
+
+    for d in cache_dirs:
+        if not os.path.exists(d):
+            continue
+        try:
+            for root, dirs, files in os.walk(d):
+                for f in files:
+                    fp = os.path.join(root, f)
+                    try:
+                        sz = os.path.getsize(fp)
+                        os.remove(fp)
+                        total_files += 1
+                        total_bytes += sz
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    mb_freed = total_bytes / (1024 * 1024)
+    log_cb(f"✅ Очистка завершена: удалено {total_files} файлов кэша ({mb_freed:.2f} МБ освобождено).")
+    return total_files, total_bytes
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -369,7 +509,6 @@ class App(tk.Tk):
     PRIMARY       = "#6366F1"  # Индиго / Фиолетовый
     PRIMARY_HOVER = "#4F46E5"
     SUCCESS       = "#238636"  # Зеленый
-    SUCCESS_HOVER = "#2EA043"
     DANGER        = "#DA3633"  # Красный
     WARNING       = "#D29922"  # Оранжевый / Янтарный
     CYAN          = "#38BDF8"  # Голубой
@@ -377,7 +516,6 @@ class App(tk.Tk):
     # Цвета текста
     TEXT_MAIN     = "#F0F6FC"  # Яркий белый
     TEXT_MUTED    = "#8B949E"  # Серый второстепенный
-    TEXT_ACCENT   = "#79C0FF"  # Светло-голубой
 
     # Шрифты
     FONT_TITLE = ("Segoe UI", 13, "bold")
@@ -394,7 +532,7 @@ class App(tk.Tk):
         self.title("Driver Reinstaller — GPU & iGPU Maintenance")
         self.configure(bg=self.BG_MAIN)
         self.resizable(True, True)
-        self.minsize(860, 640)
+        self.minsize(920, 680)
 
         self._devices: list[dict] = []
         self._sel: int | None = None
@@ -407,7 +545,7 @@ class App(tk.Tk):
 
         self.update_idletasks()
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        w, h = 920, 680
+        w, h = 980, 720
         self.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
 
     # ── Построение интерфейса ────────────────────────────────────
@@ -418,7 +556,6 @@ class App(tk.Tk):
         header.pack(fill="x", side="top")
         header.pack_propagate(False)
 
-        # Логотип и заголовок
         title_box = tk.Frame(header, bg=self.BG_HEADER)
         title_box.pack(side="left", padx=20, pady=10)
 
@@ -437,7 +574,7 @@ class App(tk.Tk):
         ).pack(anchor="w")
 
         tk.Label(
-            text_sub_box, text="Быстрая диагностика и переустановка драйверов GPU / iGPU",
+            text_sub_box, text="Быстрая диагностика, переустановка драйверов и обслуживание GPU",
             bg=self.BG_HEADER, fg=self.TEXT_MUTED, font=self.FONT_SM
         ).pack(anchor="w")
 
@@ -445,7 +582,6 @@ class App(tk.Tk):
         badges_box = tk.Frame(header, bg=self.BG_HEADER)
         badges_box.pack(side="right", padx=20, pady=12)
 
-        # Бейдж прав администратора
         is_adm = is_admin()
         adm_bg = "#1B4729" if is_adm else "#5C1D24"
         adm_fg = "#7EE787" if is_adm else "#FFA198"
@@ -458,7 +594,6 @@ class App(tk.Tk):
         )
         adm_badge.pack(side="right", padx=(8, 0))
 
-        # Бейдж devcon
         self._devcon_badge = tk.Label(
             badges_box, text=self._devcon_status_badge_text(),
             bg="#16293D" if self._devcon_path else "#3D2B16",
@@ -469,10 +604,9 @@ class App(tk.Tk):
         self._devcon_badge.pack(side="right")
         self._devcon_badge.bind("<Button-1>", lambda _: self._prompt_devcon_download())
 
-        # Тонкая разделительная линия
         tk.Frame(self, bg=self.BORDER, height=1).pack(fill="x", side="top")
 
-        # ── 2. Основная рабочая область (Split View) ──────────────
+        # ── 2. Основная рабочая область ──────────────────────────
         main_panes = tk.Frame(self, bg=self.BG_MAIN)
         main_panes.pack(fill="both", expand=True, padx=16, pady=14)
 
@@ -482,7 +616,6 @@ class App(tk.Tk):
         left_col.pack(side="left", fill="y", padx=(0, 14))
         left_col.pack_propagate(False)
 
-        # Заголовок боковой панели
         side_head = tk.Frame(left_col, bg=self.BG_SIDEBAR)
         side_head.pack(fill="x", padx=14, pady=(12, 6))
 
@@ -499,7 +632,6 @@ class App(tk.Tk):
         )
         self._btn_refresh.pack(side="right")
 
-        # Скроллируемая область с карточками устройств
         card_canvas_container = tk.Frame(left_col, bg=self.BG_SIDEBAR)
         card_canvas_container.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
@@ -526,17 +658,16 @@ class App(tk.Tk):
         right_col = tk.Frame(main_panes, bg=self.BG_MAIN)
         right_col.pack(side="left", fill="both", expand=True)
 
-        # ── Карточка выбранного адаптера ──────────────────────────
+        # Карточка выбранного адаптера
         self._card = tk.Frame(right_col, bg=self.BG_CARD,
                               highlightbackground=self.BORDER, highlightthickness=1)
         self._card.pack(fill="x", pady=(0, 10))
 
         card_padding = tk.Frame(self._card, bg=self.BG_CARD)
-        card_padding.pack(fill="x", padx=16, pady=14)
+        card_padding.pack(fill="x", padx=16, pady=12)
 
-        # Верхняя строка карточки: название и иконка
         name_row = tk.Frame(card_padding, bg=self.BG_CARD)
-        name_row.pack(fill="x", pady=(0, 4))
+        name_row.pack(fill="x", pady=(0, 2))
 
         self._lbl_icon = tk.Label(
             name_row, text="🖥️", bg=self.BG_CARD, fg=self.TEXT_MAIN,
@@ -547,7 +678,7 @@ class App(tk.Tk):
         self._lbl_name = tk.Label(
             name_row, text="Выберите видеоадаптер из списка слева",
             bg=self.BG_CARD, fg=self.TEXT_MAIN, font=self.FONT_TITLE,
-            wraplength=460, justify="left"
+            wraplength=520, justify="left"
         )
         self._lbl_name.pack(side="left", fill="x", expand=True)
 
@@ -555,27 +686,27 @@ class App(tk.Tk):
             card_padding, text="", bg=self.BG_CARD, fg=self.CYAN,
             font=self.FONT_BOLD
         )
-        self._lbl_kind_tag.pack(anchor="w", pady=(0, 10))
+        self._lbl_kind_tag.pack(anchor="w", pady=(0, 8))
 
-        # Сетка параметров: 3 виджета-плитки
+        # Сетка параметров: 4 виджета-плитки
         self._info_grid = tk.Frame(card_padding, bg=self.BG_CARD)
         self._info_grid.pack(fill="x", pady=(0, 6))
 
-        # Плитка: Версия драйвера
         self._tile_ver = self._create_tile(self._info_grid, "ВЕРСИЯ ДРАЙВЕРА", "—")
-        self._tile_ver.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self._tile_ver.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
-        # Плитка: Дата драйвера
         self._tile_date = self._create_tile(self._info_grid, "ДАТА ВЫПУСКА", "—")
-        self._tile_date.pack(side="left", fill="x", expand=True, padx=3)
+        self._tile_date.pack(side="left", fill="x", expand=True, padx=2)
 
-        # Плитка: Статус устройства
+        self._tile_res = self._create_tile(self._info_grid, "РАЗРЕШЕНИЕ И ГЦ", "—")
+        self._tile_res.pack(side="left", fill="x", expand=True, padx=2)
+
         self._tile_stat = self._create_tile(self._info_grid, "СТАТУС WINDOWS", "—")
-        self._tile_stat.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        self._tile_stat.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
         # Строка с PNP Hardware ID
-        self._pnp_box = tk.Frame(card_padding, bg="#161B22", padx=8, pady=6)
-        self._pnp_box.pack(fill="x", pady=(8, 0))
+        self._pnp_box = tk.Frame(card_padding, bg="#161B22", padx=8, pady=4)
+        self._pnp_box.pack(fill="x", pady=(6, 0))
 
         tk.Label(
             self._pnp_box, text="PNP ID:", bg="#161B22", fg=self.TEXT_MUTED,
@@ -584,12 +715,12 @@ class App(tk.Tk):
 
         self._lbl_pnp = tk.Label(
             self._pnp_box, text="—", bg="#161B22", fg="#A5D6FF",
-            font=self.FONT_CODE, wraplength=400, justify="left"
+            font=self.FONT_CODE, wraplength=460, justify="left"
         )
         self._lbl_pnp.pack(side="left", padx=6, fill="x", expand=True)
 
         self._btn_copy_pnp = tk.Button(
-            self._pnp_box, text="📋", command=self._copy_pnp,
+            self._pnp_box, text="📋 Копировать", command=self._copy_pnp,
             bg="#21262D", fg=self.TEXT_MAIN, activebackground=self.BG_CARD_HOVER,
             activeforeground="white", font=self.FONT_SM, relief="flat",
             bd=0, cursor="hand2", padx=6, pady=2
@@ -598,44 +729,98 @@ class App(tk.Tk):
 
         # ── Панель основных действий (Action Buttons) ────────────
         btn_bar = tk.Frame(right_col, bg=self.BG_MAIN)
-        btn_bar.pack(fill="x", pady=(0, 10))
+        btn_bar.pack(fill="x", pady=(0, 8))
 
-        # Большая кнопка переустановки
         self._btn_reinstall = tk.Button(
             btn_bar, text="⚡  Переустановить драйвер", command=self._start_reinstall,
             bg=self.PRIMARY, fg="white", activebackground=self.PRIMARY_HOVER,
-            activeforeground="white", font=("Segoe UI", 11, "bold"),
-            relief="flat", cursor="hand2", pady=10, bd=0
+            activeforeground="white", font=("Segoe UI", 10, "bold"),
+            relief="flat", cursor="hand2", pady=8, bd=0
         )
         self._btn_reinstall.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self._btn_reinstall.config(state="disabled")
 
-        # Кнопка открытия официальной страницы
         self._btn_driver_page = tk.Button(
             btn_bar, text="🌐  Новый драйвер", command=self._open_driver_page,
             bg=self.BG_CARD, fg=self.TEXT_MAIN, activebackground=self.BG_CARD_HOVER,
             activeforeground="white", font=self.FONT_BOLD,
-            relief="flat", cursor="hand2", pady=10, bd=0
+            relief="flat", cursor="hand2", pady=8, bd=0
         )
         self._btn_driver_page.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self._btn_driver_page.config(state="disabled")
 
-        # Кнопка открытия Диспетчера устройств
         self._btn_devmgmt = tk.Button(
             btn_bar, text="🛠️  Диспетчер устройств", command=self._open_devmgmt,
             bg=self.BG_CARD, fg=self.TEXT_MAIN, activebackground=self.BG_CARD_HOVER,
             activeforeground="white", font=self.FONT_BOLD,
-            relief="flat", cursor="hand2", pady=10, bd=0
+            relief="flat", cursor="hand2", pady=8, bd=0
         )
         self._btn_devmgmt.pack(side="left", fill="x", expand=True)
+
+        # ── 3. Тулбар расширенных инструментов (Инструменты безопасности и очистки) ──
+        tools_card = tk.Frame(right_col, bg=self.BG_CARD,
+                              highlightbackground=self.BORDER, highlightthickness=1)
+        tools_card.pack(fill="x", pady=(0, 8))
+
+        tools_box = tk.Frame(tools_card, bg=self.BG_CARD, padx=10, pady=6)
+        tools_box.pack(fill="x")
+
+        tk.Label(
+            tools_box, text="СИСТЕМНЫЕ ИНСТРУМЕНТЫ:",
+            bg=self.BG_CARD, fg=self.TEXT_MUTED, font=("Segoe UI", 7, "bold")
+        ).pack(side="left", padx=(0, 6))
+
+        # Кнопка: Точка восстановления
+        btn_restore = tk.Button(
+            tools_box, text="🛡️ Точка восстановления", command=self._action_restore_point,
+            bg="#161B22", fg=self.TEXT_MAIN, activebackground=self.BG_CARD_HOVER,
+            activeforeground="white", font=self.FONT_SM, relief="flat",
+            bd=0, cursor="hand2", padx=6, pady=3
+        )
+        btn_restore.pack(side="left", padx=2)
+
+        # Кнопка: Бэкап драйверов
+        btn_backup = tk.Button(
+            tools_box, text="💾 Бэкап драйверов", command=self._action_backup_drivers,
+            bg="#161B22", fg=self.TEXT_MAIN, activebackground=self.BG_CARD_HOVER,
+            activeforeground="white", font=self.FONT_SM, relief="flat",
+            bd=0, cursor="hand2", padx=6, pady=3
+        )
+        btn_backup.pack(side="left", padx=2)
+
+        # Кнопка: Сброс видео (Win+Ctrl+Shift+B)
+        btn_restart_video = tk.Button(
+            tools_box, text="⚡ Сброс видео (Win+Ctrl+Shift+B)", command=self._action_restart_video,
+            bg="#161B22", fg=self.CYAN, activebackground=self.BG_CARD_HOVER,
+            activeforeground="white", font=self.FONT_SM, relief="flat",
+            bd=0, cursor="hand2", padx=6, pady=3
+        )
+        btn_restart_video.pack(side="left", padx=2)
+
+        # Кнопка: Очистить шейдеры
+        btn_clean_shaders = tk.Button(
+            tools_box, text="🧹 Очистить шейдеры", command=self._action_clean_shaders,
+            bg="#161B22", fg="#7EE787", activebackground=self.BG_CARD_HOVER,
+            activeforeground="white", font=self.FONT_SM, relief="flat",
+            bd=0, cursor="hand2", padx=6, pady=3
+        )
+        btn_clean_shaders.pack(side="left", padx=2)
+
+        # Кнопка: dxdiag
+        btn_dxdiag = tk.Button(
+            tools_box, text="🔍 dxdiag", command=self._action_dxdiag,
+            bg="#161B22", fg=self.TEXT_MUTED, activebackground=self.BG_CARD_HOVER,
+            activeforeground="white", font=self.FONT_SM, relief="flat",
+            bd=0, cursor="hand2", padx=6, pady=3
+        )
+        btn_dxdiag.pack(side="right")
 
         # ── Информационный блок devcon ───────────────────────────
         self._devcon_frame = tk.Frame(right_col, bg=self.BG_CARD,
                                       highlightbackground=self.BORDER, highlightthickness=1)
-        self._devcon_frame.pack(fill="x", pady=(0, 10))
+        self._devcon_frame.pack(fill="x", pady=(0, 8))
         self._rebuild_devcon_block()
 
-        # Прогресс-бар загрузки devcon
         self._progress_var = tk.DoubleVar(value=0)
         self._progressbar = ttk.Progressbar(
             right_col, variable=self._progress_var,
@@ -654,7 +839,6 @@ class App(tk.Tk):
             bg=self.BG_MAIN, fg=self.TEXT_MUTED, font=("Segoe UI", 8, "bold")
         ).pack(side="left")
 
-        # Кнопки копирования и очистки лога
         btn_copy_log = tk.Button(
             log_header, text="Копировать лог", command=self._copy_log,
             bg=self.BG_CARD, fg=self.TEXT_MUTED, activebackground=self.BG_CARD_HOVER,
@@ -679,11 +863,10 @@ class App(tk.Tk):
             log_container,
             bg=self.BG_TERMINAL, fg=self.TEXT_MAIN,
             font=self.FONT_CODE, bd=0, relief="flat",
-            state="disabled", height=8, insertbackground="white"
+            state="disabled", height=7, insertbackground="white"
         )
         self._log.pack(fill="both", expand=True, padx=6, pady=6)
 
-        # Подсветка строк журнала
         self._log.tag_config("ok",    foreground="#7EE787")  # Зеленый
         self._log.tag_config("err",   foreground="#FFA198")  # Красный
         self._log.tag_config("warn",  foreground="#F1E05A")  # Желтый
@@ -695,7 +878,7 @@ class App(tk.Tk):
 
     def _create_tile(self, parent, title: str, val: str) -> tk.Frame:
         """Создает стильную плитку-параметр."""
-        tile = tk.Frame(parent, bg="#161B22", padx=10, pady=8,
+        tile = tk.Frame(parent, bg="#161B22", padx=8, pady=6,
                         highlightbackground=self.BORDER, highlightthickness=1)
         tk.Label(
             tile, text=title, bg="#161B22", fg=self.TEXT_MUTED,
@@ -704,7 +887,7 @@ class App(tk.Tk):
 
         lbl_val = tk.Label(
             tile, text=val, bg="#161B22", fg=self.TEXT_MAIN,
-            font=("Segoe UI", 11, "bold")
+            font=("Segoe UI", 10, "bold")
         )
         lbl_val.pack(anchor="w", pady=(2, 0))
         tile._val_lbl = lbl_val
@@ -714,12 +897,12 @@ class App(tk.Tk):
         for w in self._devcon_frame.winfo_children():
             w.destroy()
 
-        box = tk.Frame(self._devcon_frame, bg=self.BG_CARD, padx=14, pady=8)
+        box = tk.Frame(self._devcon_frame, bg=self.BG_CARD, padx=12, pady=6)
         box.pack(fill="x")
 
         if self._devcon_path:
             tk.Label(
-                box, text="✔  devcon.exe активен (глубокая переустановка доступна)",
+                box, text="✔  devcon.exe активен (глубокая переустановка и удаление доступны)",
                 bg=self.BG_CARD, fg="#7EE787", font=self.FONT_SM
             ).pack(side="left")
             tk.Label(
@@ -728,7 +911,7 @@ class App(tk.Tk):
             ).pack(side="right")
         else:
             tk.Label(
-                box, text="💡 Рекомендуется скачать devcon.exe для более чистой переустановки:",
+                box, text="💡 Скачайте devcon.exe для аппаратного сброса шины при переустановке:",
                 bg=self.BG_CARD, fg=self.TEXT_MUTED, font=self.FONT_SM
             ).pack(side="left")
 
@@ -736,7 +919,7 @@ class App(tk.Tk):
                 box, text="⬇ Скачать devcon (~6 MB)", command=self._prompt_devcon_download,
                 bg=self.PRIMARY, fg="white", activebackground=self.PRIMARY_HOVER,
                 activeforeground="white", font=self.FONT_SM, relief="flat",
-                bd=0, cursor="hand2", padx=8, pady=3
+                bd=0, cursor="hand2", padx=8, pady=2
             )
             btn_get.pack(side="right")
 
@@ -751,6 +934,13 @@ class App(tk.Tk):
             self._log_write("🛠️ Открыт Диспетчер устройств Windows.")
         except Exception as e:
             self._log_write(f"❌ Не удалось открыть devmgmt.msc: {e}")
+
+    def _action_dxdiag(self):
+        try:
+            subprocess.Popen("dxdiag.exe", shell=True)
+            self._log_write("🔍 Запущена утилита диагностики DirectX (dxdiag).")
+        except Exception as e:
+            self._log_write(f"❌ Ошибка запуска dxdiag: {e}")
 
     def _copy_pnp(self):
         if self._sel is not None and self._devices:
@@ -781,13 +971,13 @@ class App(tk.Tk):
                 tag = "ok"
             elif any(msg.startswith(p) for p in ("❌",)):
                 tag = "err"
-            elif any(msg.startswith(p) for p in ("⚠",)):
+            elif any(msg.startswith(p) for p in ("⚠️", "⚠")):
                 tag = "warn"
             elif msg.startswith("▶"):
                 tag = "cmd"
             elif msg.startswith("  "):
                 tag = "gray"
-            elif any(msg.startswith(p) for p in ("🌐", "📥", "📦", "🔐", "📋", "🛠️")):
+            elif any(msg.startswith(p) for p in ("🌐", "📥", "📦", "🔐", "📋", "🛠️", "🛡️", "💾", "⚡", "🧹", "🔍")):
                 tag = "blue"
             self._log.insert("end", msg + "\n", tag)
             self._log.see("end")
@@ -805,6 +995,77 @@ class App(tk.Tk):
                 self._progressbar.pack_forget()
                 self._progress_label.pack_forget()
         self.after(0, _do)
+
+    # ── Вызов системных инструментов ─────────────────────────────
+
+    def _action_restore_point(self):
+        if not is_admin():
+            messagebox.showerror(
+                "Требуются права администратора",
+                "Создание точки восстановления требует прав администратора.\n"
+                "Перезапустите утилиту от имени администратора."
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Точка восстановления",
+            "Создать контрольную точку восстановления Windows прямо сейчас?\n\n"
+            "Это защитит систему на случай любых непредвиденных сбоев при установке драйверов."
+        ):
+            return
+
+        self._log_write("\n" + "═" * 50)
+        def _worker():
+            ok = create_restore_point(self._log_write)
+            if ok:
+                self.after(0, lambda: messagebox.showinfo(
+                    "Точка восстановления", "Контрольная точка восстановления Windows успешно создана!"
+                ))
+            else:
+                self.after(0, lambda: messagebox.showwarning(
+                    "Внимание", "Не удалось создать точку восстановления. Проверьте журнал."
+                ))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _action_backup_drivers(self):
+        default_dir = os.path.join(os.getcwd(), "DriverBackups")
+        target_dir = filedialog.askdirectory(
+            title="Выберите папку для сохранения бэкапа драйверов",
+            initialdir=os.getcwd()
+        )
+        if not target_dir:
+            return
+
+        def _worker():
+            export_driver_backup(target_dir, self._log_write)
+            self.after(0, lambda: messagebox.showinfo(
+                "Бэкап драйверов", f"Резервная копия драйверов сохранена в:\n{target_dir}"
+            ))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _action_restart_video(self):
+        restart_gpu_driver(self._log_write)
+
+    def _action_clean_shaders(self):
+        if not messagebox.askyesno(
+            "Очистка шейдерного кэша",
+            "Очистить кэш шейдеров DirectX, NVIDIA, AMD и Intel?\n\n"
+            "Это безопасно освободит место на диске и устранит микрофризы в играх после смены драйвера."
+        ):
+            return
+
+        def _worker():
+            files, bytes_cnt = clean_shader_caches(self._log_write)
+            mb = bytes_cnt / (1024 * 1024)
+            self.after(0, lambda: messagebox.showinfo(
+                "Кэш очищен",
+                f"Успешно удалено {files} файлов кэша ({mb:.1f} МБ освобождено).\n\n"
+                "При следующем запуске игр шейдеры скомпилируются заново без старых ошибок."
+            ))
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # ── Логика работы с устройствами ─────────────────────────────
 
@@ -837,14 +1098,12 @@ class App(tk.Tk):
                 self._log_write(
                     f"  • {d['name']} | {d['kind']} | drv {d['driver_ver']}"
                 )
-            # Автовыбор первого устройства
             self._select_device(0)
         else:
             self._log_write("⚠ Видеоадаптеры не обнаружены.")
 
     def _create_device_card(self, idx: int, dev: dict) -> tk.Frame:
         """Создает стильную карточку видеоадаптера в боковом списке."""
-        # Цвета рамки вендора
         vendor = dev.get("vendor", "unknown")
         if vendor == "nvidia":
             badge_text = "NVIDIA"
@@ -905,7 +1164,6 @@ class App(tk.Tk):
         )
         drv_lbl.pack(anchor="w")
 
-        # Привязка кликов ко всем дочерним виджетам
         def _on_click(_=None):
             self._select_device(idx)
 
@@ -919,7 +1177,6 @@ class App(tk.Tk):
         if self._busy:
             return
         self._sel = idx
-        # Подсветка карточек
         for i, f in enumerate(self._card_frames):
             if i == idx:
                 f.config(highlightbackground=self.BORDER_ACTIVE, highlightthickness=2)
@@ -938,11 +1195,11 @@ class App(tk.Tk):
             self._lbl_icon.config(text="🖥️")
             self._tile_ver._val_lbl.config(text="—")
             self._tile_date._val_lbl.config(text="—")
+            self._tile_res._val_lbl.config(text="—")
             self._tile_stat._val_lbl.config(text="—")
             self._lbl_pnp.config(text="—")
             return
 
-        # Иконка вендора
         vendor = dev.get("vendor", "unknown")
         if vendor == "nvidia":
             self._lbl_icon.config(text="🟢", fg="#76B900")
@@ -954,16 +1211,16 @@ class App(tk.Tk):
             self._lbl_icon.config(text="🖥️", fg=self.TEXT_MAIN)
 
         self._lbl_name.config(text=dev["name"])
-        self._lbl_kind_tag.config(text=f"● {dev['kind']}")
+        self._lbl_kind_tag.config(text=f"● {dev['kind']} • Память: {dev.get('ram', 'N/A')}")
 
-        # Обновляем плитки
         self._tile_ver._val_lbl.config(text=dev.get("driver_ver", "N/A"))
         self._tile_date._val_lbl.config(text=dev.get("driver_date", "N/A"))
+        self._tile_res._val_lbl.config(text=dev.get("resolution", "N/A"))
+
         stat = dev.get("status", "OK")
         stat_color = "#7EE787" if stat.lower() == "ok" else "#FFA198"
         self._tile_stat._val_lbl.config(text=f"● {stat}", fg=stat_color)
 
-        # PNP ID
         self._lbl_pnp.config(text=dev.get("device_id", "N/A"))
 
     def _open_driver_page(self):
