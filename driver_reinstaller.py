@@ -860,6 +860,16 @@ class App(tk.Tk):
         btn_power_opt.pack(side="left", padx=2)
         self._add_hover(btn_power_opt, "#161B22")
 
+        # Кнопка: Проверка на майнинг
+        btn_mining = tk.Button(
+            tools_box, text="⛏️ Проверка на майнинг", command=self._action_check_mining,
+            bg="#161B22", fg="#DA3633", activebackground=self.BG_CARD_HOVER,
+            activeforeground="white", font=self.FONT_SM, relief="flat",
+            bd=0, cursor="hand2", padx=6, pady=3
+        )
+        btn_mining.pack(side="left", padx=2)
+        self._add_hover(btn_mining, "#161B22")
+
         # Кнопка: Очистить шейдеры
         btn_clean_shaders = tk.Button(
             tools_box, text="🧹 Очистить шейдеры", command=self._action_clean_shaders,
@@ -882,7 +892,7 @@ class App(tk.Tk):
 
         # Сохраняем ссылки на все кнопки инструментов для блокировки при _busy
         self._tool_buttons = [btn_restore, btn_backup, btn_restart_video,
-                              btn_power_opt, btn_clean_shaders, btn_dxdiag]
+                              btn_power_opt, btn_mining, btn_clean_shaders, btn_dxdiag]
 
         # ── Информационный блок devcon ───────────────────────────
         self._devcon_frame = tk.Frame(right_col, bg=self.BG_CARD,
@@ -1171,6 +1181,30 @@ class App(tk.Tk):
         def _worker():
             restart_gpu_driver(self._log_write)
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _action_check_mining(self):
+        """Сканирует систему на наличие процессов-майнеров."""
+        self._log_write("\n🔍 Запуск сканирования на майнеры...")
+        miner_names = ["xmrig", "ethminer", "ccminer", "cgminer", "minerd", "lolminer", "t-rex"]
+        
+        found = False
+        import psutil
+        
+        for proc in psutil.process_iter(['name', 'exe']):
+            try:
+                name = proc.info['name']
+                if name and any(m in name.lower() for m in miner_names):
+                    self._log_write(f"❌ ОБНАРУЖЕН ПОДОЗРИТЕЛЬНЫЙ ПРОЦЕСС: {name} (PID: {proc.pid})")
+                    self._log_write(f"   Путь: {proc.info['exe']}")
+                    found = True
+            except:
+                pass
+        
+        if not found:
+            self._log_write("✅ Майнеров по известным именам не обнаружено.")
+            messagebox.showinfo("Сканирование", "Майнеров по списку имен не обнаружено.")
+        else:
+            messagebox.showwarning("ВНИМАНИЕ!", "Обнаружены подозрительные процессы! См. журнал.")
 
     def _action_power_opt(self):
         """
