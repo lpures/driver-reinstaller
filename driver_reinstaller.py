@@ -26,6 +26,7 @@ import webbrowser
 import wmi
 import pythoncom
 import requests
+import pynvml
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -121,7 +122,10 @@ def get_gpu_devices() -> list[dict]:
 
             # Память адаптера
             raw_ram = gpu.AdapterRAM
-            if raw_ram:
+            ram_str = None
+            
+            # 1. Пробуем WMI
+            if raw_ram and int(raw_ram) > 0:
                 try:
                     ram_mb = int(raw_ram) // (1024 * 1024)
                     if ram_mb >= 1024:
@@ -129,8 +133,42 @@ def get_gpu_devices() -> list[dict]:
                     else:
                         ram_str = f"{ram_mb} МБ"
                 except Exception:
-                    ram_str = "N/A"
-            else:
+                    pass
+            
+            name_low = name.lower()
+            vendor = "unknown"
+            kind = "GPU"
+            if "nvidia" in name_low:
+                vendor = "nvidia"
+                kind   = "dGPU (дискретная NVIDIA)"
+            elif "amd" in name_low or "radeon" in name_low:
+                if any(x in name_low for x in ["vega", "780m", "760m", "680m", "integrated"]):
+                    vendor = "amd"
+                    kind   = "iGPU (встроенная AMD)"
+                else:
+                    vendor = "amd"
+                    kind   = "dGPU (дискретная AMD)"
+            elif "intel" in name_low:
+                vendor = "intel"
+                kind   = "iGPU (встроенная Intel)"
+
+            # 2. Если WMI не помог и это NVIDIA — пробуем pynvml
+            if (not ram_str or "Динамическая" in ram_str) and vendor == "nvidia":
+                try:
+                    pynvml.nvmlInit()
+                    deviceCount = pynvml.nvmlDeviceGetCount()
+                    for i in range(deviceCount):
+                        handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                        g_name = pynvml.nvmlDeviceGetName(handle)
+                        if name.lower() in g_name.lower():
+                            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                            ram_str = f"{mem.total / (1024**3):.1f} ГБ"
+                            break
+                    pynvml.nvmlShutdown()
+                except:
+                    pass
+            
+            if not ram_str:
                 ram_str = "Динамическая"
 
             name_low = name.lower()
@@ -470,7 +508,7 @@ def clean_shader_caches(log_cb) -> tuple[int, int]:
         if not os.path.exists(d):
             continue
         try:
-            for root, dirs, files in os.walk(d):
+            for root, dirs, files in os.walk(d, topdown=False):
                 for f in files:
                     fp = os.path.join(root, f)
                     try:
@@ -478,6 +516,13 @@ def clean_shader_caches(log_cb) -> tuple[int, int]:
                         os.remove(fp)
                         total_files += 1
                         total_bytes += sz
+                    except Exception:
+                        pass
+                # Удаляем пустые поддиректории после удаления файлов
+                for sub_d in dirs:
+                    dp = os.path.join(root, sub_d)
+                    try:
+                        os.rmdir(dp)  # rmdir удаляет только пустые папки
                     except Exception:
                         pass
         except Exception:
@@ -539,6 +584,7 @@ class App(tk.Tk):
         self._busy = False
         self._devcon_path: str | None = find_devcon()
         self._card_frames: list[tk.Frame] = []
+        self._tool_buttons: list[tk.Button] = []  # Кнопки инструментов для блокировки
 
         self._build_ui()
         self._refresh_devices()
@@ -757,6 +803,10 @@ class App(tk.Tk):
         )
         self._btn_devmgmt.pack(side="left", fill="x", expand=True)
 
+        # Hover-эффекты на основные кнопки
+        self._add_hover(self._btn_driver_page, self.BG_CARD)
+        self._add_hover(self._btn_devmgmt, self.BG_CARD)
+
         # ── 3. Тулбар расширенных инструментов (Инструменты безопасности и очистки) ──
         tools_card = tk.Frame(right_col, bg=self.BG_CARD,
                               highlightbackground=self.BORDER, highlightthickness=1)
@@ -778,6 +828,7 @@ class App(tk.Tk):
             bd=0, cursor="hand2", padx=6, pady=3
         )
         btn_restore.pack(side="left", padx=2)
+        self._add_hover(btn_restore, "#161B22")
 
         # Кнопка: Бэкап драйверов
         btn_backup = tk.Button(
@@ -787,6 +838,7 @@ class App(tk.Tk):
             bd=0, cursor="hand2", padx=6, pady=3
         )
         btn_backup.pack(side="left", padx=2)
+        self._add_hover(btn_backup, "#161B22")
 
         # Кнопка: Сброс видео (Win+Ctrl+Shift+B)
         btn_restart_video = tk.Button(
@@ -796,6 +848,17 @@ class App(tk.Tk):
             bd=0, cursor="hand2", padx=6, pady=3
         )
         btn_restart_video.pack(side="left", padx=2)
+        self._add_hover(btn_restart_video, "#161B22")
+
+        # Кнопка: Оптимизация питания
+        btn_power_opt = tk.Button(
+            tools_box, text="🔋 Оптимизация питания", command=self._action_power_opt,
+            bg="#161B22", fg="#FBBF24", activebackground=self.BG_CARD_HOVER,
+            activeforeground="white", font=self.FONT_SM, relief="flat",
+            bd=0, cursor="hand2", padx=6, pady=3
+        )
+        btn_power_opt.pack(side="left", padx=2)
+        self._add_hover(btn_power_opt, "#161B22")
 
         # Кнопка: Очистить шейдеры
         btn_clean_shaders = tk.Button(
@@ -805,6 +868,7 @@ class App(tk.Tk):
             bd=0, cursor="hand2", padx=6, pady=3
         )
         btn_clean_shaders.pack(side="left", padx=2)
+        self._add_hover(btn_clean_shaders, "#161B22")
 
         # Кнопка: dxdiag
         btn_dxdiag = tk.Button(
@@ -814,6 +878,11 @@ class App(tk.Tk):
             bd=0, cursor="hand2", padx=6, pady=3
         )
         btn_dxdiag.pack(side="right")
+        self._add_hover(btn_dxdiag, "#161B22")
+
+        # Сохраняем ссылки на все кнопки инструментов для блокировки при _busy
+        self._tool_buttons = [btn_restore, btn_backup, btn_restart_video,
+                              btn_power_opt, btn_clean_shaders, btn_dxdiag]
 
         # ── Информационный блок devcon ───────────────────────────
         self._devcon_frame = tk.Frame(right_col, bg=self.BG_CARD,
@@ -855,6 +924,9 @@ class App(tk.Tk):
         )
         btn_clear_log.pack(side="right")
 
+        # Сохраняем ссылку на log_header — прогрессбар пакуется перед ним
+        self._log_header = log_header
+
         log_container = tk.Frame(right_col, bg=self.BG_TERMINAL,
                                  highlightbackground=self.BORDER, highlightthickness=1)
         log_container.pack(fill="both", expand=True)
@@ -875,6 +947,36 @@ class App(tk.Tk):
         self._log.tag_config("blue",  foreground="#79C0FF")  # Голубой
 
     # ── Вспомогательные методы создания UI ───────────────────────
+
+    def _add_hover(self, widget: tk.Button, normal_bg: str):
+        """Добавляет hover-эффект (подсветку фона) к кнопке."""
+        hover_bg = self.BG_CARD_HOVER
+
+        def _enter(_=None):
+            widget.config(bg=hover_bg)
+
+        def _leave(_=None):
+            widget.config(bg=normal_bg)
+
+        widget.bind("<Enter>", _enter)
+        widget.bind("<Leave>", _leave)
+
+    def _set_busy(self, busy: bool):
+        """Устанавливает/снимает флаг занятости и блокирует/разблокирует UI."""
+        self._busy = busy
+        state = "disabled" if busy else "normal"
+        for btn in self._tool_buttons:
+            try:
+                btn.config(state=state)
+            except tk.TclError:
+                pass
+        if busy:
+            self._btn_reinstall.config(state="disabled")
+            self._btn_refresh.config(state="disabled")
+        else:
+            self._btn_refresh.config(state="normal")
+            if self._sel is not None:
+                self._btn_reinstall.config(state="normal")
 
     def _create_tile(self, parent, title: str, val: str) -> tk.Frame:
         """Создает стильную плитку-параметр."""
@@ -989,8 +1091,8 @@ class App(tk.Tk):
             self._progress_var.set(val)
             self._progress_label.config(text=label)
             if val > 0:
-                self._progressbar.pack(fill="x", pady=(0, 2), before=self._log)
-                self._progress_label.pack(anchor="w", before=self._log)
+                self._progressbar.pack(fill="x", pady=(0, 2), before=self._log_header)
+                self._progress_label.pack(anchor="w", before=self._log_header)
             else:
                 self._progressbar.pack_forget()
                 self._progress_label.pack_forget()
@@ -999,6 +1101,8 @@ class App(tk.Tk):
     # ── Вызов системных инструментов ─────────────────────────────
 
     def _action_restore_point(self):
+        if self._busy:
+            return
         if not is_admin():
             messagebox.showerror(
                 "Требуются права администратора",
@@ -1014,21 +1118,27 @@ class App(tk.Tk):
         ):
             return
 
+        self._set_busy(True)
         self._log_write("\n" + "═" * 50)
         def _worker():
-            ok = create_restore_point(self._log_write)
-            if ok:
-                self.after(0, lambda: messagebox.showinfo(
-                    "Точка восстановления", "Контрольная точка восстановления Windows успешно создана!"
-                ))
-            else:
-                self.after(0, lambda: messagebox.showwarning(
-                    "Внимание", "Не удалось создать точку восстановления. Проверьте журнал."
-                ))
+            try:
+                ok = create_restore_point(self._log_write)
+                if ok:
+                    self.after(0, lambda: messagebox.showinfo(
+                        "Точка восстановления", "Контрольная точка восстановления Windows успешно создана!"
+                    ))
+                else:
+                    self.after(0, lambda: messagebox.showwarning(
+                        "Внимание", "Не удалось создать точку восстановления. Проверьте журнал."
+                    ))
+            finally:
+                self.after(0, lambda: self._set_busy(False))
 
         threading.Thread(target=_worker, daemon=True).start()
 
     def _action_backup_drivers(self):
+        if self._busy:
+            return
         default_dir = os.path.join(os.getcwd(), "DriverBackups")
         target_dir = filedialog.askdirectory(
             title="Выберите папку для сохранения бэкапа драйверов",
@@ -1037,18 +1147,78 @@ class App(tk.Tk):
         if not target_dir:
             return
 
+        self._set_busy(True)
         def _worker():
-            export_driver_backup(target_dir, self._log_write)
-            self.after(0, lambda: messagebox.showinfo(
-                "Бэкап драйверов", f"Резервная копия драйверов сохранена в:\n{target_dir}"
-            ))
+            try:
+                ok = export_driver_backup(target_dir, self._log_write)
+                if ok:
+                    self.after(0, lambda: messagebox.showinfo(
+                        "Бэкап драйверов", f"Резервная копия драйверов сохранена в:\n{target_dir}"
+                    ))
+                else:
+                    self.after(0, lambda: messagebox.showwarning(
+                        "Внимание", f"Бэкап завершился с предупреждениями.\nПапка: {target_dir}"
+                    ))
+            finally:
+                self.after(0, lambda: self._set_busy(False))
 
         threading.Thread(target=_worker, daemon=True).start()
 
     def _action_restart_video(self):
-        restart_gpu_driver(self._log_write)
+        if self._busy:
+            return
+        # Запускаем в потоке, чтобы не замораживать UI на keybd_event
+        def _worker():
+            restart_gpu_driver(self._log_write)
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _action_power_opt(self):
+        """
+        Применяет оптимизацию питания для предотвращения Kernel-Power 41 при АФК.
+        Отключает 'PCI Express Link State Power Management' и переводит питание GPU в 'High Performance'.
+        """
+        if not is_admin():
+            messagebox.showerror("Нет прав", "Требуются права администратора для изменения настроек питания.")
+            return
+
+        if not messagebox.askyesno(
+            "Оптимизация питания",
+            "Применить оптимизацию для предотвращения вылетов при АФК?\n\n"
+            "Это отключит энергосбережение PCI Express для предотвращения конфликтов iGPU/dGPU.\n"
+            "После применения рекомендуется перезагрузка."
+        ):
+            return
+
+        self._set_busy(True)
+        self._log_write("\n⚡ Применение оптимизации питания GPU...")
+        
+        # PowerShell команды:
+        # 1. Отключение Link State Power Management для PCI Express
+        # 2. Установка плана питания на High Performance
+        ps_cmd = (
+            "powercfg /setacvalueindex scheme_current sub_pci expresslinkstate 0; "
+            "powercfg /setdcvalueindex scheme_current sub_pci expresslinkstate 0; "
+            "powercfg /setactive scheme_current; "
+            "Write-Host 'SUCCESS'"
+        )
+
+        def _worker():
+            try:
+                code, out = _run_cmd(["powershell", "-Command", ps_cmd], self._log_write)
+                if "SUCCESS" in out:
+                    self.after(0, lambda: messagebox.showinfo(
+                        "Готово", "Оптимизация применена!\n\nРекомендуется перезагрузить ПК."
+                    ))
+                else:
+                    self.after(0, lambda: messagebox.showerror("Ошибка", "Не удалось применить настройки питания."))
+            finally:
+                self.after(0, lambda: self._set_busy(False))
+        
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _action_clean_shaders(self):
+        if self._busy:
+            return
         if not messagebox.askyesno(
             "Очистка шейдерного кэша",
             "Очистить кэш шейдеров DirectX, NVIDIA, AMD и Intel?\n\n"
@@ -1056,14 +1226,18 @@ class App(tk.Tk):
         ):
             return
 
+        self._set_busy(True)
         def _worker():
-            files, bytes_cnt = clean_shader_caches(self._log_write)
-            mb = bytes_cnt / (1024 * 1024)
-            self.after(0, lambda: messagebox.showinfo(
-                "Кэш очищен",
-                f"Успешно удалено {files} файлов кэша ({mb:.1f} МБ освобождено).\n\n"
-                "При следующем запуске игр шейдеры скомпилируются заново без старых ошибок."
-            ))
+            try:
+                files, bytes_cnt = clean_shader_caches(self._log_write)
+                mb = bytes_cnt / (1024 * 1024)
+                self.after(0, lambda: messagebox.showinfo(
+                    "Кэш очищен",
+                    f"Успешно удалено {files} файлов кэша ({mb:.1f} МБ освобождено).\n\n"
+                    "При следующем запуске игр шейдеры скомпилируются заново без старых ошибок."
+                ))
+            finally:
+                self.after(0, lambda: self._set_busy(False))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1145,7 +1319,13 @@ class App(tk.Tk):
         )
         b_lbl.pack(side="left")
 
-        kind_short = "Дискретная" if "дискретная" in dev["kind"].lower() else "Встроенная"
+        kind_low = dev["kind"].lower()
+        if "дискретная" in kind_low:
+            kind_short = "Дискретная"
+        elif "встроенная" in kind_low:
+            kind_short = "Встроенная"
+        else:
+            kind_short = "GPU"
         k_lbl = tk.Label(
             top_row, text=kind_short, bg=self.BG_CARD, fg=self.TEXT_MUTED,
             font=self.FONT_SM
@@ -1262,8 +1442,7 @@ class App(tk.Tk):
         ):
             return
 
-        self._busy = True
-        self._btn_reinstall.config(state="disabled")
+        self._set_busy(True)
         self._log_write("\n" + "─" * 50)
         self._log_write("⬇ Начало загрузки devcon.exe из Microsoft CDN...")
 
@@ -1277,10 +1456,8 @@ class App(tk.Tk):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_devcon_done(self, path: str | None):
-        self._busy = False
+        self._set_busy(False)
         self._set_progress(0)
-        if self._sel is not None:
-            self._btn_reinstall.config(state="normal")
         if path:
             self._devcon_path = path
             self._devcon_badge.config(
@@ -1326,9 +1503,8 @@ class App(tk.Tk):
         if not confirm:
             return
 
-        self._busy = True
-        self._btn_reinstall.config(state="disabled", text="⏳ Выполняется...", bg=self.WARNING)
-        self._btn_refresh.config(state="disabled")
+        self._set_busy(True)
+        self._btn_reinstall.config(text="⏳ Выполняется...", bg=self.WARNING)
         self._btn_driver_page.config(state="disabled")
 
         self._log_write("\n" + "═" * 50)
@@ -1343,11 +1519,10 @@ class App(tk.Tk):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_reinstall_done(self, ok: bool):
-        self._busy = False
+        self._set_busy(False)
         self._btn_reinstall.config(
-            state="normal", text="⚡  Переустановить драйвер", bg=self.PRIMARY
+            text="⚡  Переустановить драйвер", bg=self.PRIMARY
         )
-        self._btn_refresh.config(state="normal")
         self._btn_driver_page.config(state="normal")
 
         if ok:
