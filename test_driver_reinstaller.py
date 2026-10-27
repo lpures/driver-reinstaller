@@ -20,6 +20,8 @@ sys.modules.setdefault("tkinter", MagicMock())
 sys.modules.setdefault("tkinter.ttk", MagicMock())
 sys.modules.setdefault("tkinter.messagebox", MagicMock())
 sys.modules.setdefault("tkinter.scrolledtext", MagicMock())
+sys.modules.setdefault("pynvml", MagicMock())
+
 
 import importlib.util
 spec = importlib.util.spec_from_file_location(
@@ -30,6 +32,13 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 # ── Цвета для вывода ─────────────────────────────────────────────────────────
+# Установим кодировку UTF-8 для всего модуля, чтобы избежать UnicodeEncodeError
+import sys
+import codecs
+sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
+sys.stderr = codecs.getwriter("utf-8")(sys.stderr.detach())
+
+# ── Цвета для вывода ─────────────────────────────────────────────────────────
 GREEN  = "\033[92m"
 RED    = "\033[91m"
 YELLOW = "\033[93m"
@@ -37,10 +46,10 @@ CYAN   = "\033[96m"
 BOLD   = "\033[1m"
 RESET  = "\033[0m"
 
-def _ok(msg):  print(f"  {GREEN}[PASS]{RESET} {msg}")
-def _fail(msg):print(f"  {RED}[FAIL]{RESET} {msg}")
-def _info(msg):print(f"  {YELLOW}[INFO]{RESET} {msg}")
-def _head(msg):print(f"\n{BOLD}{CYAN}{'─'*60}{RESET}\n{BOLD} {msg}{RESET}\n{'─'*60}")
+def _ok(msg):  print(f"  {GREEN}[PASS]{RESET} {msg}".encode('utf-8', 'replace').decode('utf-8'))
+def _fail(msg):print(f"  {RED}[FAIL]{RESET} {msg}".encode('utf-8', 'replace').decode('utf-8'))
+def _info(msg):print(f"  {YELLOW}[INFO]{RESET} {msg}".encode('utf-8', 'replace').decode('utf-8'))
+def _head(msg):print(f"\n{BOLD}{CYAN}{'='*60}{RESET}\n{BOLD} {msg}{RESET}\n{'='*60}".encode('utf-8', 'replace').decode('utf-8'))
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -201,13 +210,18 @@ class TestIgnoredDevices(unittest.TestCase):
 class TestGetGpuDevices(unittest.TestCase):
 
     def _make_gpu(self, name, pnp_id="PCI\\VEN_10DE&DEV_2204",
-                  status="OK", driver_ver="31.0.0.0", driver_date="20240101000000"):
+                  status="OK", driver_ver="31.0.0.0", driver_date="20240101000000",
+                  h_res=1920, v_res=1080, refresh=60, adapter_ram=4294967296):
         gpu = MagicMock()
         gpu.Name        = name
         gpu.PNPDeviceID = pnp_id
         gpu.Status      = status
         gpu.DriverVersion = driver_ver
         gpu.DriverDate  = driver_date
+        gpu.CurrentHorizontalResolution = h_res
+        gpu.CurrentVerticalResolution   = v_res
+        gpu.CurrentRefreshRate          = refresh
+        gpu.AdapterRAM                  = adapter_ram
         return gpu
 
     @patch("wmi.WMI")
@@ -275,12 +289,54 @@ class TestGetGpuDevices(unittest.TestCase):
         gpu.Status        = None
         gpu.DriverVersion = None
         gpu.DriverDate    = None
+        gpu.CurrentHorizontalResolution = None
+        gpu.CurrentVerticalResolution   = None
+        gpu.CurrentRefreshRate          = None
+        gpu.AdapterRAM                  = None
         mock_wmi.return_value.Win32_VideoController.return_value = [gpu]
         # «Unknown» не совпадает с IGNORED_KEYWORDS
         devices = mod.get_gpu_devices()
         self.assertEqual(len(devices), 1)
         self.assertEqual(devices[0]["name"], "Unknown")
         self.assertEqual(devices[0]["driver_ver"], "N/A")
+        self.assertEqual(devices[0]["resolution"], "Не активен")
+        self.assertEqual(devices[0]["ram"], "Динамическая")
+
+    @patch("wmi.WMI")
+    def test_resolution_formatting(self, mock_wmi):
+        """Разрешение и частота обновления должны правильно форматироваться."""
+        mock_wmi.return_value.Win32_VideoController.return_value = [
+            self._make_gpu("NVIDIA RTX 3070", h_res=2560, v_res=1440, refresh=144)
+        ]
+        devices = mod.get_gpu_devices()
+        self.assertEqual(devices[0]["resolution"], "2560x1440 @ 144 Гц")
+
+    @patch("wmi.WMI")
+    def test_resolution_no_refresh(self, mock_wmi):
+        """Разрешение без частоты обновления (refresh=None)."""
+        mock_wmi.return_value.Win32_VideoController.return_value = [
+            self._make_gpu("NVIDIA RTX 3070", h_res=1920, v_res=1080, refresh=None)
+        ]
+        devices = mod.get_gpu_devices()
+        self.assertEqual(devices[0]["resolution"], "1920x1080")
+
+    @patch("wmi.WMI")
+    def test_ram_gb_formatting(self, mock_wmi):
+        """VRAM в гигабайтах должна форматироваться как X.0 ГБ."""
+        mock_wmi.return_value.Win32_VideoController.return_value = [
+            self._make_gpu("NVIDIA RTX 3070", adapter_ram=8589934592)  # 8 GB
+        ]
+        devices = mod.get_gpu_devices()
+        self.assertEqual(devices[0]["ram"], "8.0 ГБ")
+
+    @patch("wmi.WMI")
+    def test_ram_mb_formatting(self, mock_wmi):
+        """VRAM меньше 1 ГБ должна отображаться в МБ."""
+        mock_wmi.return_value.Win32_VideoController.return_value = [
+            self._make_gpu("Intel UHD 630", adapter_ram=536870912)  # 512 MB
+        ]
+        devices = mod.get_gpu_devices()
+        self.assertEqual(devices[0]["ram"], "512 МБ")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -561,6 +617,117 @@ class TestReinstallDriver(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  8.5. Новые системные инструменты (шейдеры, точка восстановления)
+# ══════════════════════════════════════════════════════════════════
+
+class TestCleanShaderCaches(unittest.TestCase):
+    """Тесты очистки шейдерного кэша."""
+
+    def _log(self):
+        logs = []; return logs, logs.append
+
+    def test_clean_empty_caches(self):
+        """Если нет директорий с кэшем — 0 файлов, 0 байт."""
+        with patch.dict(os.environ, {"LOCALAPPDATA": "C:\\NONEXISTENT_PATH_123",
+                                     "APPDATA": "C:\\NONEXISTENT_PATH_456"}):
+            logs, log_cb = self._log()
+            files, total_bytes = mod.clean_shader_caches(log_cb)
+            self.assertEqual(files, 0)
+            self.assertEqual(total_bytes, 0)
+
+    def test_clean_with_temp_files(self):
+        """Создаем временные файлы-кэши и проверяем их удаление."""
+        tmp = tempfile.mkdtemp(prefix="shader_test_")
+        try:
+            nvidia_dx = os.path.join(tmp, "NVIDIA", "DXCache")
+            os.makedirs(nvidia_dx)
+            # Создаем тестовые файлы
+            for i in range(3):
+                with open(os.path.join(nvidia_dx, f"cache_{i}.bin"), "wb") as f:
+                    f.write(b"x" * 1024)
+
+            with patch.dict(os.environ, {"LOCALAPPDATA": tmp, "APPDATA": tmp}):
+                logs, log_cb = self._log()
+                files, total_bytes = mod.clean_shader_caches(log_cb)
+                self.assertEqual(files, 3)
+                self.assertEqual(total_bytes, 3072)  # 3 * 1024
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_clean_removes_empty_subdirs(self):
+        """После удаления файлов пустые подкаталоги тоже удаляются."""
+        tmp = tempfile.mkdtemp(prefix="shader_test_")
+        try:
+            sub = os.path.join(tmp, "NVIDIA", "DXCache", "subdir1", "subdir2")
+            os.makedirs(sub)
+            with open(os.path.join(sub, "test.bin"), "wb") as f:
+                f.write(b"x" * 512)
+
+            with patch.dict(os.environ, {"LOCALAPPDATA": tmp, "APPDATA": tmp}):
+                logs, log_cb = self._log()
+                files, total_bytes = mod.clean_shader_caches(log_cb)
+                self.assertEqual(files, 1)
+                # Пустые поддиректории должны быть удалены
+                self.assertFalse(os.path.exists(sub))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestCreateRestorePoint(unittest.TestCase):
+    """Тесты создания точки восстановления."""
+
+    def _log(self):
+        logs = []; return logs, logs.append
+
+    @patch("subprocess.run")
+    def test_restore_point_success(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="SUCCESS", stderr="")
+        logs, log_cb = self._log()
+        result = mod.create_restore_point(log_cb)
+        self.assertTrue(result)
+        self.assertTrue(any("успешно" in l for l in logs))
+
+    @patch("subprocess.run")
+    def test_restore_point_failure(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="ERROR: protection disabled", stderr="")
+        logs, log_cb = self._log()
+        result = mod.create_restore_point(log_cb)
+        self.assertFalse(result)
+        self.assertTrue(any("Не удалось" in l for l in logs))
+
+
+class TestExportDriverBackup(unittest.TestCase):
+    """Тесты экспорта бэкапа драйверов."""
+
+    def _log(self):
+        logs = []; return logs, logs.append
+
+    @patch("subprocess.run")
+    def test_backup_success(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="exported", stderr="")
+        tmp = tempfile.mkdtemp(prefix="backup_test_")
+        try:
+            logs, log_cb = self._log()
+            result = mod.export_driver_backup(tmp, log_cb)
+            self.assertTrue(result)
+            self.assertTrue(any("успешно" in l for l in logs))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    @patch("subprocess.run")
+    def test_backup_nonzero_return(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="partial failure", stderr="")
+        tmp = tempfile.mkdtemp(prefix="backup_test_")
+        try:
+            logs, log_cb = self._log()
+            result = mod.export_driver_backup(tmp, log_cb)
+            self.assertFalse(result)
+            self.assertTrue(any("предупреждениями" in l for l in logs))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ══════════════════════════════════════════════════════════════════
 #  9. Константы и конфигурация
 # ══════════════════════════════════════════════════════════════════
 
@@ -605,7 +772,8 @@ class TestRealWMIIntegration(unittest.TestCase):
 
     def test_devices_have_required_keys(self):
         devices = mod.get_gpu_devices()
-        required = {"name", "kind", "vendor", "device_id", "status", "driver_ver", "driver_date"}
+        required = {"name", "kind", "vendor", "device_id", "status",
+                    "driver_ver", "driver_date", "resolution", "ram"}
         for d in devices:
             for key in required:
                 self.assertIn(key, d, f"Отсутствует ключ '{key}' в {d}")
